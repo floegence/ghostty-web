@@ -47,6 +47,18 @@ describe('floegence fork package contract', () => {
     expect(releaseConfig.packages['.']['package-name']).toBe('@floegence/ghostty-web');
   });
 
+  test('pins Bun for reproducible CI and release installs', async () => {
+    const ci = await readFile('.github/workflows/ci.yml', 'utf8');
+    const publish = await readFile('.github/workflows/publish.yml', 'utf8');
+
+    expect(
+      [...ci.matchAll(/bun-version:\s*['"]?([^'"\n]+)['"]?/g)].map(([, version]) => version)
+    ).toEqual(['1.3.11', '1.3.11', '1.3.11', '1.3.11', '1.3.11']);
+    expect(
+      [...publish.matchAll(/bun-version:\s*['"]?([^'"\n]+)['"]?/g)].map(([, version]) => version)
+    ).toEqual(['1.3.11', '1.3.11']);
+  });
+
   test('limits the bootstrap token to the explicit first scoped RC publish', async () => {
     const workflow = await readFile('.github/workflows/publish.yml', 'utf8');
 
