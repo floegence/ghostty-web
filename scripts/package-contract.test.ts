@@ -47,6 +47,23 @@ describe('floegence fork package contract', () => {
     expect(releaseConfig.packages['.']['package-name']).toBe('@floegence/ghostty-web');
   });
 
+  test('limits the bootstrap token to the explicit first scoped RC publish', async () => {
+    const workflow = await readFile('.github/workflows/publish.yml', 'utf8');
+
+    expect(workflow).toContain('bootstrap:');
+    expect(workflow).toContain('BOOTSTRAP_REQUESTED: ${{ inputs.bootstrap }}');
+    expect(workflow).toContain('EVENT_NAME: ${{ github.event_name }}');
+    expect(workflow).toContain('[[ "$TAG" == "v0.5.0-rc.0" ]]');
+    expect(workflow).toContain('npm view "$PACKAGE_NAME" name');
+    expect(workflow).toContain('Registry lookup must fail with E404 before bootstrap');
+    expect(workflow.match(/NPM_BOOTSTRAP_TOKEN/g)).toHaveLength(1);
+    expect(workflow.match(/NODE_AUTH_TOKEN/g)).toHaveLength(1);
+    expect(workflow).toContain("if: steps.tag.outputs.bootstrap != 'true'");
+    expect(workflow).toContain("if: steps.tag.outputs.bootstrap == 'true'");
+    expect(workflow).toContain('npm publish --tag "${NPM_TAG}" --provenance --access public');
+    expect(workflow).toContain('npm publish --tag next --provenance --access public');
+  });
+
   test('documents fork ownership and the pinned Ghostty patch boundary', async () => {
     const readme = await readFile('README.md', 'utf8');
     expect(readme).toContain('@floegence/ghostty-web');
