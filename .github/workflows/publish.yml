@@ -70,9 +70,8 @@ jobs:
           const fs = require('fs');
           const version = process.env.VERSION;
           const root = JSON.parse(fs.readFileSync('package.json', 'utf8')).version;
-          const demo = JSON.parse(fs.readFileSync('demo/package.json', 'utf8')).version;
           const flake = fs.readFileSync('flake.nix', 'utf8').match(/version = "([^"]+)";/)?.[1];
-          for (const [name, value] of Object.entries({ root, demo, flake })) {
+          for (const [name, value] of Object.entries({ root, flake })) {
             if (value !== version) throw new Error(`${name} version ${value} does not match tag version ${version}`);
           }
           console.log(`Validated source versions for ${version}`);
@@ -124,44 +123,15 @@ jobs:
       - name: Ensure current npm for trusted publishing
         run: npm install -g npm@latest
 
-      - name: Publish ghostty-web
+      - name: Publish @floegence/ghostty-web
         env:
           VERSION: ${{ steps.tag.outputs.version }}
           NPM_TAG: ${{ steps.tag.outputs.npm_tag }}
         run: |
           set -euo pipefail
           PACKAGE_NAME=$(node -p "require('./package.json').name")
-          if npm view "${PACKAGE_NAME}@${VERSION}" version >/dev/null 2>&1; then
-            echo "${PACKAGE_NAME}@${VERSION} already exists; skipping publish"
-            npm dist-tag add "${PACKAGE_NAME}@${VERSION}" "${NPM_TAG}" || echo "Unable to repair ${NPM_TAG} dist-tag with current npm credentials; package already exists."
-          else
-            npm publish --tag "${NPM_TAG}" --provenance --access public
-          fi
-
-      - name: Pin and validate demo package
-        env:
-          VERSION: ${{ steps.tag.outputs.version }}
-        run: |
-          set -euo pipefail
-          node <<'NODE'
-          const fs = require('fs');
-          const version = process.env.VERSION;
-          const path = 'demo/package.json';
-          const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
-          pkg.version = version;
-          pkg.dependencies['ghostty-web'] = version;
-          fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\n');
-          console.log(`Pinned @ghostty-web/demo to ghostty-web ${version}`);
-          NODE
-
-      - name: Publish @ghostty-web/demo
-        working-directory: demo
-        env:
-          VERSION: ${{ steps.tag.outputs.version }}
-          NPM_TAG: ${{ steps.tag.outputs.npm_tag }}
-        run: |
-          set -euo pipefail
-          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          EXPECTED_PACKAGE_NAME="@floegence/ghostty-web"
+          test "$PACKAGE_NAME" = "$EXPECTED_PACKAGE_NAME"
           if npm view "${PACKAGE_NAME}@${VERSION}" version >/dev/null 2>&1; then
             echo "${PACKAGE_NAME}@${VERSION} already exists; skipping publish"
             npm dist-tag add "${PACKAGE_NAME}@${VERSION}" "${NPM_TAG}" || echo "Unable to repair ${NPM_TAG} dist-tag with current npm credentials; package already exists."
@@ -252,40 +222,15 @@ jobs:
           fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           NODE
 
-      - name: Publish ghostty-web next
+      - name: Publish @floegence/ghostty-web next
         if: steps.release-commit.outputs.skip != 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
           PACKAGE_NAME=$(node -p "require('./package.json').name")
-          if npm view "${PACKAGE_NAME}@${VERSION}" version >/dev/null 2>&1; then
-            echo "${PACKAGE_NAME}@${VERSION} already exists; skipping"
-          else
-            npm publish --tag next --provenance --access public
-          fi
-
-      - name: Prepare demo package
-        if: steps.release-commit.outputs.skip != 'true'
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          node <<'NODE'
-          const fs = require('fs');
-          const pkg = JSON.parse(fs.readFileSync('demo/package.json', 'utf8'));
-          pkg.version = process.env.VERSION;
-          pkg.dependencies['ghostty-web'] = process.env.VERSION;
-          fs.writeFileSync('demo/package.json', JSON.stringify(pkg, null, 2) + '\n');
-          NODE
-
-      - name: Publish @ghostty-web/demo next
-        if: steps.release-commit.outputs.skip != 'true'
-        working-directory: demo
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          EXPECTED_PACKAGE_NAME="@floegence/ghostty-web"
+          test "$PACKAGE_NAME" = "$EXPECTED_PACKAGE_NAME"
           if npm view "${PACKAGE_NAME}@${VERSION}" version >/dev/null 2>&1; then
             echo "${PACKAGE_NAME}@${VERSION} already exists; skipping"
           else

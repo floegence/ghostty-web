@@ -1,5 +1,5 @@
 /**
- * Public API for @cmux/ghostty-terminal
+ * Public API for @floegence/ghostty-web
  *
  * Main entry point following xterm.js conventions
  */
@@ -18,7 +18,7 @@ let ghosttyInstance: Ghostty | null = null;
  *
  * @example
  * ```typescript
- * import { init, Terminal } from 'ghostty-web';
+ * import { init, Terminal } from '@floegence/ghostty-web';
  *
  * await init();
  * const term = new Terminal();
@@ -42,11 +42,11 @@ export function getGhostty(): Ghostty {
     throw new Error(
       'ghostty-web not initialized. Call init() before creating Terminal instances.\n' +
         'Example:\n' +
-        '  import { init, Terminal } from "ghostty-web";\n' +
+        '  import { init, Terminal } from "@floegence/ghostty-web";\n' +
         '  await init();\n' +
         '  const term = new Terminal();\n\n' +
         'For tests, pass a Ghostty instance directly:\n' +
-        '  import { Ghostty, Terminal } from "ghostty-web";\n' +
+        '  import { Ghostty, Terminal } from "@floegence/ghostty-web";\n' +
         '  const ghostty = await Ghostty.load();\n' +
         '  const term = new Terminal({ ghostty });'
     );
@@ -76,11 +76,21 @@ export {
   GhosttyTerminal,
   KeyEncoder,
   CellFlags,
+  CheckpointResult,
   DirtyState,
   KeyEncoderOption,
 } from './ghostty';
 export { Key, KeyAction, Mods } from './types';
-export type { KeyEvent, GhosttyCell, RGB, Cursor, TerminalHandle } from './types';
+export type {
+  CapturedCheckpoint,
+  CheckpointCoordinates,
+  CheckpointMetadata,
+  KeyEvent,
+  GhosttyCell,
+  RGB,
+  Cursor,
+  TerminalHandle,
+} from './types';
 
 // Low-level components (for custom integrations)
 export { CanvasRenderer } from './renderer';

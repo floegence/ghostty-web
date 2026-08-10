@@ -65,16 +65,9 @@
   ],
   "packages": {
     ".": {
-      "package-name": "ghostty-web",
+      "package-name": "@floegence/ghostty-web",
       "changelog-path": "CHANGELOG.md",
-      "extra-files": [
-        {
-          "type": "json",
-          "path": "demo/package.json",
-          "jsonpath": "$.version"
-        },
-        "flake.nix"
-      ]
+      "extra-files": ["flake.nix"]
     }
   },
   "versioning": "prerelease",

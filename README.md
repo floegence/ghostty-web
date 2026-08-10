@@ -1,28 +1,18 @@
-# ghostty-web
+# @floegence/ghostty-web
 
-[![NPM Version](https://img.shields.io/npm/v/ghostty-web)](https://npmjs.com/package/ghostty-web) [![NPM Downloads](https://img.shields.io/npm/dw/ghostty-web)](https://npmjs.com/package/ghostty-web) [![npm bundle size](https://img.shields.io/bundlephobia/minzip/ghostty-web)](https://npmjs.com/package/ghostty-web) [![license](https://img.shields.io/github/license/coder/ghostty-web)](./LICENSE)
+[![license](https://img.shields.io/github/license/floegence/ghostty-web)](./LICENSE)
+
+This is the FloeTerm-maintained fork of Coder's ghostty-web. It publishes only
+`@floegence/ghostty-web` and adds a versioned, validated logical checkpoint API
+for durable terminal reconstruction.
 
 [Ghostty](https://github.com/ghostty-org/ghostty) for the web with [xterm.js](https://github.com/xtermjs/xterm.js) API compatibility — giving you a proper VT100 implementation in the browser.
 
-- Migrate from xterm by changing your import: `@xterm/xterm` → `ghostty-web`
+- Migrate from xterm by changing your import: `@xterm/xterm` → `@floegence/ghostty-web`
 - WASM-compiled parser from Ghostty—the same code that runs the native app
 - Zero runtime dependencies, ~400KB WASM bundle
 
 Originally created for [Mux](https://github.com/coder/mux) (a desktop app for isolated, parallel agentic development), but designed to be used anywhere.
-
-## Try It
-
-- [Live Demo](https://ghostty.ondis.co) on an ephemeral VM (thank you to Greg from [disco.cloud](https://disco.cloud) for hosting).
-
-- On your computer:
-
-  ```bash
-  npx @ghostty-web/demo@next
-  ```
-
-  This starts a loopback-only HTTP server with a real shell on `http://127.0.0.1:8080`. The demo protects `/ws` with a per-run same-origin token and rejects cross-origin WebSocket handshakes. Works best on Linux and macOS.
-
-  To intentionally bind somewhere else, set `HOST=<host>`. If you serve the demo through extra hostnames or a wildcard bind such as `HOST=0.0.0.0`, also set `GHOSTTY_ALLOWED_HOSTS=host1,host2`. Avoid remote exposure unless you understand the risk: the demo starts a real local shell.
 
 ![ghostty](https://github.com/user-attachments/assets/aceee7eb-d57b-4d89-ac3d-ee1885d0187a)
 
@@ -40,15 +30,15 @@ xterm.js reimplements terminal emulation in JavaScript. Every escape sequence, e
 ## Installation
 
 ```bash
-npm install ghostty-web
+npm install @floegence/ghostty-web
 ```
 
 ## Usage
 
-ghostty-web aims to be API-compatible with the xterm.js API.
+`@floegence/ghostty-web` aims to be API-compatible with the xterm.js API.
 
 ```javascript
-import { init, Terminal } from 'ghostty-web';
+import { init, Terminal } from '@floegence/ghostty-web';
 
 await init();
 
@@ -69,8 +59,11 @@ For a comprehensive client <-> server example, refer to the [demo](./demo/index.
 
 ## Development
 
-ghostty-web builds from Ghostty's source with a [patch](./patches/ghostty-wasm-api.patch) to expose additional
-functionality.
+This fork builds from pinned Ghostty commit
+`5714ed07a1012573261b7b7e3ed2add9c1504496` with
+[`patches/ghostty-wasm-api.patch`](./patches/ghostty-wasm-api.patch). The patch
+owns the C/WASM terminal and checkpoint ABI; TypeScript never serializes raw
+WASM memory or implements a second VT parser.
 
 > Requires Zig and Bun.
 
@@ -78,11 +71,8 @@ functionality.
 bun run build
 ```
 
-Mitchell Hashimoto (author of Ghostty) has [been working](https://mitchellh.com/writing/libghostty-is-coming) on `libghostty` which makes this all possible. The patches are very minimal thanks to the work the Ghostty team has done, and we expect them to get smaller.
-
-This library will eventually consume a native Ghostty WASM distribution once available, and will continue to provide an xterm.js compatible API.
-
-At Coder we're big fans of Ghostty, so kudos to that team for all the amazing work.
+The original Coder project and Ghostty remain credited under their MIT licenses
+in [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).
 
 ## License
 

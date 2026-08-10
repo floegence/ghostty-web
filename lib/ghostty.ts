@@ -7,7 +7,11 @@
  */
 
 import {
+  type CapturedCheckpoint,
   CellFlags,
+  type CheckpointCoordinates,
+  type CheckpointMetadata,
+  CheckpointResult,
   type Cursor,
   DirtyState,
   GHOSTTY_CONFIG_SIZE,
@@ -26,6 +30,10 @@ import {
 // Re-export types for convenience
 export {
   CellFlags,
+  type CapturedCheckpoint,
+  type CheckpointCoordinates,
+  type CheckpointMetadata,
+  CheckpointResult,
   type Cursor,
   DirtyState,
   type GhosttyCell,
@@ -261,6 +269,14 @@ export class GhosttyTerminal {
   /** Size of GhosttyCell in WASM (16 bytes) */
   private static readonly CELL_SIZE = 16;
 
+  private static readonly CHECKPOINT_MAGIC = 'FLOE-GHOSTTY-CKPT';
+  private static readonly CHECKPOINT_HEADER_SIZE = 93;
+  private static readonly DEFAULT_CHECKPOINT_COORDINATES: CheckpointCoordinates = {
+    historySequence: 0n,
+    geometryGeneration: 0n,
+    parserEpoch: 0n,
+  };
+
   /** Reusable buffer for viewport operations */
   private viewportBufferPtr: number = 0;
   private viewportBufferSize: number = 0;
@@ -356,12 +372,183 @@ export class GhosttyTerminal {
     this.initCellPool();
   }
 
+  getCheckpointFormatVersion(): number {
+    return this.exports.ghostty_terminal_checkpoint_format_version();
+  }
+
+  captureCheckpoint(
+    coordinates: CheckpointCoordinates = GhosttyTerminal.DEFAULT_CHECKPOINT_COORDINATES
+  ): CapturedCheckpoint {
+    GhosttyTerminal.validateCheckpointCoordinates(coordinates);
+    const writtenPtr = this.exports.ghostty_wasm_alloc_usize();
+    if (!writtenPtr) throw new Error('Failed to allocate checkpoint size output');
+
+    let checkpointPtr = 0;
+    let checkpointSize = 0;
+    try {
+      const queryResult = this.exports.ghostty_terminal_checkpoint_capture(
+        this.handle,
+        coordinates.historySequence,
+        coordinates.geometryGeneration,
+        coordinates.parserEpoch,
+        0,
+        0,
+        writtenPtr
+      );
+      if (queryResult !== CheckpointResult.BUFFER_TOO_SMALL) {
+        this.throwCheckpointError('capture size query', queryResult);
+      }
+
+      checkpointSize = new DataView(this.memory.buffer).getUint32(writtenPtr, true);
+      if (checkpointSize < GhosttyTerminal.CHECKPOINT_HEADER_SIZE) {
+        throw new Error(`Invalid checkpoint size returned by WASM: ${checkpointSize}`);
+      }
+      checkpointPtr = this.exports.ghostty_wasm_alloc_u8_array(checkpointSize);
+      if (!checkpointPtr) throw new Error('Failed to allocate checkpoint output buffer');
+
+      const captureResult = this.exports.ghostty_terminal_checkpoint_capture(
+        this.handle,
+        coordinates.historySequence,
+        coordinates.geometryGeneration,
+        coordinates.parserEpoch,
+        checkpointPtr,
+        checkpointSize,
+        writtenPtr
+      );
+      if (captureResult !== CheckpointResult.OK) {
+        this.throwCheckpointError('capture', captureResult);
+      }
+
+      const actualSize = new DataView(this.memory.buffer).getUint32(writtenPtr, true);
+      if (actualSize !== checkpointSize) {
+        throw new Error(
+          `Checkpoint size changed during capture: expected ${checkpointSize}, got ${actualSize}`
+        );
+      }
+      const bytes = new Uint8Array(this.memory.buffer, checkpointPtr, actualSize).slice();
+      return { bytes, metadata: this.parseCheckpointMetadata(bytes) };
+    } finally {
+      if (checkpointPtr) {
+        this.exports.ghostty_wasm_free_u8_array(checkpointPtr, checkpointSize);
+      }
+      this.exports.ghostty_wasm_free_usize(writtenPtr);
+    }
+  }
+
+  validateCheckpoint(bytes: Uint8Array): CheckpointMetadata {
+    return this.withCheckpointInput(bytes, (checkpointPtr) => {
+      const result = this.exports.ghostty_terminal_checkpoint_validate(
+        this.handle,
+        checkpointPtr,
+        bytes.length
+      );
+      if (result !== CheckpointResult.OK) this.throwCheckpointError('validate', result);
+      return this.parseCheckpointMetadata(bytes);
+    });
+  }
+
+  restoreCheckpoint(bytes: Uint8Array, expectedCoordinates?: CheckpointCoordinates): void {
+    if (expectedCoordinates) GhosttyTerminal.validateCheckpointCoordinates(expectedCoordinates);
+    this.withCheckpointInput(bytes, (checkpointPtr) => {
+      const expected = expectedCoordinates ?? GhosttyTerminal.DEFAULT_CHECKPOINT_COORDINATES;
+      const result = this.exports.ghostty_terminal_checkpoint_restore(
+        this.handle,
+        checkpointPtr,
+        bytes.length,
+        expectedCoordinates !== undefined,
+        expected.historySequence,
+        expected.geometryGeneration,
+        expected.parserEpoch
+      );
+      if (result !== CheckpointResult.OK) this.throwCheckpointError('restore', result);
+    });
+  }
+
+  getStateDigest(): string {
+    const digestLength = 32;
+    const digestPtr = this.exports.ghostty_wasm_alloc_u8_array(digestLength);
+    if (!digestPtr) throw new Error('Failed to allocate checkpoint digest buffer');
+    try {
+      const result = this.exports.ghostty_terminal_checkpoint_state_digest(this.handle, digestPtr);
+      if (result !== CheckpointResult.OK) this.throwCheckpointError('state digest', result);
+      return GhosttyTerminal.bytesToHex(
+        new Uint8Array(this.memory.buffer, digestPtr, digestLength)
+      );
+    } finally {
+      this.exports.ghostty_wasm_free_u8_array(digestPtr, digestLength);
+    }
+  }
+
   free(): void {
     if (this.viewportBufferPtr) {
       this.exports.ghostty_wasm_free_u8_array(this.viewportBufferPtr, this.viewportBufferSize);
       this.viewportBufferPtr = 0;
     }
     this.exports.ghostty_terminal_free(this.handle);
+  }
+
+  private withCheckpointInput<T>(bytes: Uint8Array, operation: (ptr: number) => T): T {
+    const ptr = bytes.length > 0 ? this.exports.ghostty_wasm_alloc_u8_array(bytes.length) : 0;
+    if (bytes.length > 0 && !ptr) throw new Error('Failed to allocate checkpoint input buffer');
+    try {
+      if (bytes.length > 0) new Uint8Array(this.memory.buffer).set(bytes, ptr);
+      return operation(ptr);
+    } finally {
+      if (ptr) this.exports.ghostty_wasm_free_u8_array(ptr, bytes.length);
+    }
+  }
+
+  private parseCheckpointMetadata(bytes: Uint8Array): CheckpointMetadata {
+    if (bytes.length < GhosttyTerminal.CHECKPOINT_HEADER_SIZE) {
+      throw new Error('Checkpoint is shorter than the v1 header');
+    }
+    const magic = new TextDecoder().decode(
+      bytes.subarray(0, GhosttyTerminal.CHECKPOINT_MAGIC.length)
+    );
+    if (magic !== GhosttyTerminal.CHECKPOINT_MAGIC) throw new Error('Invalid checkpoint magic');
+
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const versionOffset = GhosttyTerminal.CHECKPOINT_MAGIC.length;
+    const formatVersion = view.getUint16(versionOffset, true);
+    const headerSize = view.getUint16(versionOffset + 2, true);
+    if (headerSize !== GhosttyTerminal.CHECKPOINT_HEADER_SIZE) {
+      throw new Error(`Unsupported checkpoint header size: ${headerSize}`);
+    }
+    const cols = view.getUint32(versionOffset + 4, true);
+    const rows = view.getUint32(versionOffset + 8, true);
+    const historySequence = view.getBigUint64(versionOffset + 12, true);
+    const geometryGeneration = view.getBigUint64(versionOffset + 20, true);
+    const parserEpoch = view.getBigUint64(versionOffset + 28, true);
+    const uncompressedLength = Number(view.getBigUint64(versionOffset + 36, true));
+    const checksumOffset = versionOffset + 44;
+    return {
+      formatVersion,
+      cols,
+      rows,
+      uncompressedLength,
+      checksum: GhosttyTerminal.bytesToHex(bytes.subarray(checksumOffset, checksumOffset + 32)),
+      historySequence,
+      geometryGeneration,
+      parserEpoch,
+    };
+  }
+
+  private throwCheckpointError(operation: string, result: number): never {
+    const name = CheckpointResult[result] ?? `UNKNOWN_${result}`;
+    throw new Error(`Checkpoint ${operation} failed: ${name}`);
+  }
+
+  private static bytesToHex(bytes: Uint8Array): string {
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  }
+
+  private static validateCheckpointCoordinates(coordinates: CheckpointCoordinates): void {
+    const maxU64 = (1n << 64n) - 1n;
+    for (const [field, value] of Object.entries(coordinates)) {
+      if (typeof value !== 'bigint' || value < 0n || value > maxU64) {
+        throw new RangeError(`Checkpoint ${field} must be an unsigned 64-bit bigint`);
+      }
+    }
   }
 
   // ==========================================================================

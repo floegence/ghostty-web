@@ -1,8 +1,9 @@
 {
   "lockfileVersion": 1,
+  "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "@cmux/ghostty-terminal",
+      "name": "@floegence/ghostty-web",
       "devDependencies": {
         "@ai-sdk/anthropic": "^4.0.0",
         "@biomejs/biome": "^1.9.4",
