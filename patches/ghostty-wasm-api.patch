@@ -4,7 +4,7 @@ index e451b171a..89c623d8b 100644
 +++ b/.gitignore
 @@ -23,3 +23,4 @@ glad.zip
  /ghostty.qcow2
- 
+
  vgcore.*
 +node_modules/
 diff --git a/include/ghostty/vt.h b/include/ghostty/vt.h
@@ -20,7 +20,7 @@ index 4f8fef88e..ca9fb1d4d 100644
   * - @ref osc "OSC Parser" - Parse OSC (Operating System Command) sequences
   * - @ref sgr "SGR Parser" - Parse SGR (Select Graphic Rendition) sequences
 @@ -74,6 +75,7 @@ extern "C" {
- 
+
  #include <ghostty/vt/result.h>
  #include <ghostty/vt/allocator.h>
 +#include <ghostty/vt/terminal.h>
@@ -29,10 +29,10 @@ index 4f8fef88e..ca9fb1d4d 100644
  #include <ghostty/vt/key.h>
 diff --git a/include/ghostty/vt/terminal.h b/include/ghostty/vt/terminal.h
 new file mode 100644
-index 000000000..c467102c3
+index 000000000..26d795ca5
 --- /dev/null
 +++ b/include/ghostty/vt/terminal.h
-@@ -0,0 +1,285 @@
+@@ -0,0 +1,340 @@
 +/**
 + * @file terminal.h
 + *
@@ -113,6 +113,20 @@ index 000000000..c467102c3
 +    GHOSTTY_DIRTY_FULL = 2
 +} GhosttyDirty;
 +
++/** Stable checkpoint operation result codes. */
++typedef enum {
++    GHOSTTY_CHECKPOINT_OK = 0,
++    GHOSTTY_CHECKPOINT_INVALID_FORMAT = 1,
++    GHOSTTY_CHECKPOINT_UNSUPPORTED_VERSION = 2,
++    GHOSTTY_CHECKPOINT_CHECKSUM_MISMATCH = 3,
++    GHOSTTY_CHECKPOINT_DIMENSION_MISMATCH = 4,
++    GHOSTTY_CHECKPOINT_RESOURCE_LIMIT = 5,
++    GHOSTTY_CHECKPOINT_STATE_INVARIANT = 6,
++    GHOSTTY_CHECKPOINT_OUT_OF_MEMORY = 7,
++    GHOSTTY_CHECKPOINT_BUFFER_TOO_SMALL = 8,
++    GHOSTTY_CHECKPOINT_INVALID_ARGUMENT = 9
++} GhosttyCheckpointResult;
++
 +/* ============================================================================
 + * Lifecycle
 + * ========================================================================= */
@@ -141,6 +155,47 @@ index 000000000..c467102c3
 +
 +/** Write data to terminal (parses VT sequences) */
 +void ghostty_terminal_write(GhosttyTerminal term, const uint8_t* data, size_t len);
++
++/** Logical checkpoint format version. */
++uint32_t ghostty_terminal_checkpoint_format_version(void);
++
++/**
++ * Capture into caller-owned memory. Call with out_buffer=NULL and buffer_size=0
++ * to query required_size; this returns GHOSTTY_CHECKPOINT_BUFFER_TOO_SMALL.
++ */
++GhosttyCheckpointResult ghostty_terminal_checkpoint_capture(
++    GhosttyTerminal term,
++    uint64_t history_sequence,
++    uint64_t geometry_generation,
++    uint64_t parser_epoch,
++    uint8_t* out_buffer,
++    size_t buffer_size,
++    size_t* required_size
++);
++
++/** Validate the complete checkpoint envelope and logical state. */
++GhosttyCheckpointResult ghostty_terminal_checkpoint_validate(
++    GhosttyTerminal term,
++    const uint8_t* checkpoint,
++    size_t checkpoint_size
++);
++
++/** Atomically restore a checkpoint matching the terminal dimensions. */
++GhosttyCheckpointResult ghostty_terminal_checkpoint_restore(
++    GhosttyTerminal term,
++    const uint8_t* checkpoint,
++    size_t checkpoint_size,
++    bool enforce_coordinates,
++    uint64_t history_sequence,
++    uint64_t geometry_generation,
++    uint64_t parser_epoch
++);
++
++/** Write the 32-byte canonical logical state digest. */
++GhosttyCheckpointResult ghostty_terminal_checkpoint_state_digest(
++    GhosttyTerminal term,
++    uint8_t out_digest[32]
++);
 +
 +/* ============================================================================
 + * RenderState API - High-performance rendering
@@ -319,10 +374,10 @@ index 000000000..c467102c3
 +
 +#endif /* GHOSTTY_VT_TERMINAL_H */
 diff --git a/src/lib_vt.zig b/src/lib_vt.zig
-index 03a883e20..1336676d7 100644
+index 03a883e20..b44821725 100644
 --- a/src/lib_vt.zig
 +++ b/src/lib_vt.zig
-@@ -140,6 +140,45 @@ comptime {
+@@ -140,6 +140,50 @@ comptime {
          @export(&c.sgr_unknown_partial, .{ .name = "ghostty_sgr_unknown_partial" });
          @export(&c.sgr_attribute_tag, .{ .name = "ghostty_sgr_attribute_tag" });
          @export(&c.sgr_attribute_value, .{ .name = "ghostty_sgr_attribute_value" });
@@ -332,6 +387,11 @@ index 03a883e20..1336676d7 100644
 +        @export(&c.terminal_free, .{ .name = "ghostty_terminal_free" });
 +        @export(&c.terminal_resize, .{ .name = "ghostty_terminal_resize" });
 +        @export(&c.terminal_write, .{ .name = "ghostty_terminal_write" });
++        @export(&c.terminal_checkpoint_format_version, .{ .name = "ghostty_terminal_checkpoint_format_version" });
++        @export(&c.terminal_checkpoint_capture, .{ .name = "ghostty_terminal_checkpoint_capture" });
++        @export(&c.terminal_checkpoint_validate, .{ .name = "ghostty_terminal_checkpoint_validate" });
++        @export(&c.terminal_checkpoint_restore, .{ .name = "ghostty_terminal_checkpoint_restore" });
++        @export(&c.terminal_checkpoint_state_digest, .{ .name = "ghostty_terminal_checkpoint_state_digest" });
 +
 +        // RenderState API - high-performance rendering
 +        @export(&c.render_state_update, .{ .name = "ghostty_render_state_update" });
@@ -365,11 +425,53 @@ index 03a883e20..1336676d7 100644
 +        // Response API (for DSR and other queries)
 +        @export(&c.terminal_has_response, .{ .name = "ghostty_terminal_has_response" });
 +        @export(&c.terminal_read_response, .{ .name = "ghostty_terminal_read_response" });
- 
+
          // On Wasm we need to export our allocator convenience functions.
          if (builtin.target.cpu.arch.isWasm()) {
+@@ -182,6 +226,7 @@ pub const std_options: std.Options = options: {
+
+ test {
+     _ = terminal;
++    _ = @import("terminal/checkpoint.zig");
+     _ = @import("lib/main.zig");
+     @import("std").testing.refAllDecls(input);
+     if (comptime terminal.options.c_abi) {
+diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
+index ba2af2473..6a0486d9a 100644
+--- a/src/terminal/Screen.zig
++++ b/src/terminal/Screen.zig
+@@ -848,15 +848,24 @@ pub fn cursorDownScroll(self: *Screen) !void {
+         // Our new row is always dirty
+         self.cursorMarkDirty();
+
+-        // Clear the new row so it gets our bg color. We only do this
+-        // if we have a bg color at all.
+-        if (self.cursor.style.bg_color != .none) {
++        // Always clear the new row's cells. When pages.grow() extends an
++        // existing page, the new row's cell memory may contain stale data
++        // from previously erased rows. Without clearing, these stale cells
++        // become visible when the row isn't fully overwritten, such as after
++        // bare CRLF output with the default cursor style.
++        {
+             const page: *Page = &page_pin.node.data;
++            const row = self.cursor.page_row;
++            const cells_offset = row.cells;
++            const dirty = row.dirty;
+             self.clearCells(
+                 page,
+-                self.cursor.page_row,
+-                page.getCells(self.cursor.page_row),
++                row,
++                page.getCells(row),
+             );
++            // Reset row-level metadata that clearCells does not touch while
++            // preserving the backing cell offset and dirty state.
++            row.* = .{ .cells = cells_offset, .dirty = dirty };
+         }
+     }
+
 diff --git a/src/terminal/c/main.zig b/src/terminal/c/main.zig
-index bc92597f5..d0ee49c1b 100644
+index bc92597f5..bd072e15c 100644
 --- a/src/terminal/c/main.zig
 +++ b/src/terminal/c/main.zig
 @@ -4,6 +4,7 @@ pub const key_event = @import("key_event.zig");
@@ -377,11 +479,11 @@ index bc92597f5..d0ee49c1b 100644
  pub const paste = @import("paste.zig");
  pub const sgr = @import("sgr.zig");
 +pub const terminal = @import("terminal.zig");
- 
+
  // The full C API, unexported.
  pub const osc_new = osc.new;
-@@ -52,6 +53,46 @@ pub const key_encoder_encode = key_encode.encode;
- 
+@@ -52,6 +53,51 @@ pub const key_encoder_encode = key_encode.encode;
+
  pub const paste_is_safe = paste.is_safe;
  
 +// Terminal lifecycle
@@ -390,6 +492,11 @@ index bc92597f5..d0ee49c1b 100644
 +pub const terminal_free = terminal.free;
 +pub const terminal_resize = terminal.resize;
 +pub const terminal_write = terminal.write;
++pub const terminal_checkpoint_format_version = terminal.checkpointFormatVersion;
++pub const terminal_checkpoint_capture = terminal.checkpointCapture;
++pub const terminal_checkpoint_validate = terminal.checkpointValidate;
++pub const terminal_checkpoint_restore = terminal.checkpointRestore;
++pub const terminal_checkpoint_state_digest = terminal.checkpointStateDigest;
 +
 +// RenderState API - high-performance rendering
 +pub const render_state_update = terminal.renderStateUpdate;
@@ -427,7 +534,7 @@ index bc92597f5..d0ee49c1b 100644
  test {
      _ = color;
      _ = osc;
-@@ -59,6 +100,7 @@ test {
+@@ -59,6 +105,7 @@ test {
      _ = key_encode;
      _ = paste;
      _ = sgr;
@@ -437,10 +544,10 @@ index bc92597f5..d0ee49c1b 100644
      _ = @import("../../lib/allocator.zig");
 diff --git a/src/terminal/c/terminal.zig b/src/terminal/c/terminal.zig
 new file mode 100644
-index 000000000..73ae2e6fa
+index 000000000..4028813dd
 --- /dev/null
 +++ b/src/terminal/c/terminal.zig
-@@ -0,0 +1,1123 @@
+@@ -0,0 +1,1275 @@
 +//! C API wrapper for Terminal
 +//!
 +//! This provides a minimal, high-performance interface to Ghostty's Terminal
@@ -471,6 +578,7 @@ index 000000000..73ae2e6fa
 +const point = @import("../point.zig");
 +const Style = @import("../style.zig").Style;
 +const device_status = @import("../device_status.zig");
++const checkpoint = @import("../checkpoint.zig");
 +
 +const log = std.log.scoped(.terminal_c);
 +
@@ -792,6 +900,20 @@ index 000000000..73ae2e6fa
 +    full = 2,
 +};
 +
++/// Stable checkpoint result codes exposed by the C/WASM ABI.
++pub const GhosttyCheckpointResult = enum(c_int) {
++    ok = 0,
++    invalid_format = 1,
++    unsupported_version = 2,
++    checksum_mismatch = 3,
++    dimension_mismatch = 4,
++    resource_limit = 5,
++    state_invariant = 6,
++    out_of_memory = 7,
++    buffer_too_small = 8,
++    invalid_argument = 9,
++};
++
 +/// C-compatible terminal configuration
 +pub const GhosttyTerminalConfig = extern struct {
 +    scrollback_limit: u32,
@@ -928,6 +1050,143 @@ index 000000000..73ae2e6fa
 +}
 +
 +// ============================================================================
++// Checkpoint API
++// ============================================================================
++
++fn checkpointResult(err: checkpoint.Error) GhosttyCheckpointResult {
++    return switch (err) {
++        error.InvalidFormat => .invalid_format,
++        error.UnsupportedVersion => .unsupported_version,
++        error.ChecksumMismatch => .checksum_mismatch,
++        error.DimensionMismatch => .dimension_mismatch,
++        error.ResourceLimit => .resource_limit,
++        error.StateInvariant => .state_invariant,
++        error.OutOfMemory => .out_of_memory,
++    };
++}
++
++pub fn checkpointFormatVersion() callconv(.c) u32 {
++    return checkpoint.format_version;
++}
++
++/// Capture a checkpoint into caller-owned memory. Passing a null output buffer
++/// performs the required-size query and returns buffer_too_small.
++pub fn checkpointCapture(
++    ptr: ?*anyopaque,
++    history_sequence: u64,
++    geometry_generation: u64,
++    parser_epoch: u64,
++    out: ?[*]u8,
++    out_size: usize,
++    written: ?*usize,
++) callconv(.c) GhosttyCheckpointResult {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return .invalid_argument));
++    const written_ptr = written orelse return .invalid_argument;
++    if (!wrapper.stream.checkpointReady()) return .state_invariant;
++    const bytes = checkpoint.capture(
++        wrapper.alloc,
++        &wrapper.terminal,
++        wrapper.response_buffer.items,
++        .{
++            .history_sequence = history_sequence,
++            .geometry_generation = geometry_generation,
++            .parser_epoch = parser_epoch,
++        },
++    ) catch |err| return checkpointResult(err);
++    defer wrapper.alloc.free(bytes);
++
++    written_ptr.* = bytes.len;
++    if (out_size < bytes.len) return .buffer_too_small;
++    const output = out orelse return .invalid_argument;
++    @memcpy(output[0..bytes.len], bytes);
++    return .ok;
++}
++
++/// Validate the complete logical payload, not only its envelope.
++pub fn checkpointValidate(
++    ptr: ?*anyopaque,
++    data: ?[*]const u8,
++    len: usize,
++) callconv(.c) GhosttyCheckpointResult {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return .invalid_argument));
++    const input = data orelse return .invalid_argument;
++    var decoded = checkpoint.decode(wrapper.alloc, input[0..len], null, null, null) catch |err|
++        return checkpointResult(err);
++    decoded.deinit(wrapper.alloc);
++    return .ok;
++}
++
++/// Restore only after the complete payload has been decoded into a temporary
++/// terminal. The commit below performs no allocation and cannot partially fail.
++pub fn checkpointRestore(
++    ptr: ?*anyopaque,
++    data: ?[*]const u8,
++    len: usize,
++    enforce_coordinates: bool,
++    history_sequence: u64,
++    geometry_generation: u64,
++    parser_epoch: u64,
++) callconv(.c) GhosttyCheckpointResult {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return .invalid_argument));
++    const input = data orelse return .invalid_argument;
++    const decoded = checkpoint.decode(
++        wrapper.alloc,
++        input[0..len],
++        wrapper.terminal.cols,
++        wrapper.terminal.rows,
++        if (enforce_coordinates) .{
++            .history_sequence = history_sequence,
++            .geometry_generation = geometry_generation,
++            .parser_epoch = parser_epoch,
++        } else null,
++    ) catch |err| return checkpointResult(err);
++
++    var old_terminal = wrapper.terminal;
++    var old_response = wrapper.response_buffer;
++    var old_stream = wrapper.stream;
++    var old_render_state = wrapper.render_state;
++
++    wrapper.terminal = decoded.terminal;
++    wrapper.response_buffer = .{
++        .items = decoded.response,
++        .capacity = decoded.response.len,
++    };
++    wrapper.handler = ResponseHandler.init(
++        wrapper.alloc,
++        &wrapper.terminal,
++        &wrapper.response_buffer,
++    );
++    wrapper.stream = ResponseStream.init(wrapper.handler);
++    wrapper.render_state = RenderState.empty;
++    wrapper.last_screen_is_alternate = wrapper.terminal.screens.active_key != .alternate;
++
++    old_stream.deinit();
++    old_response.deinit(wrapper.alloc);
++    old_render_state.deinit(wrapper.alloc);
++    old_terminal.deinit(wrapper.alloc);
++    return .ok;
++}
++
++/// Return a canonical digest of the complete logical checkpoint bytes.
++pub fn checkpointStateDigest(
++    ptr: ?*anyopaque,
++    out: ?*[32]u8,
++) callconv(.c) GhosttyCheckpointResult {
++    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return .invalid_argument));
++    const output = out orelse return .invalid_argument;
++    if (!wrapper.stream.checkpointReady()) return .state_invariant;
++    const bytes = checkpoint.capture(
++        wrapper.alloc,
++        &wrapper.terminal,
++        wrapper.response_buffer.items,
++        .{},
++    ) catch |err| return checkpointResult(err);
++    defer wrapper.alloc.free(bytes);
++    std.crypto.hash.sha2.Sha256.hash(bytes, output, .{});
++    return .ok;
++}
++
++// ============================================================================
 +// RenderState API - High-performance rendering
 +// ============================================================================
 +
@@ -935,26 +1194,26 @@ index 000000000..73ae2e6fa
 +/// Returns dirty state: 0=none, 1=partial, 2=full
 +pub fn renderStateUpdate(ptr: ?*anyopaque) callconv(.c) GhosttyDirty {
 +    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return .full));
-+    
++
 +    // Detect screen buffer switch (normal <-> alternate)
 +    const current_is_alternate = wrapper.terminal.screens.active_key == .alternate;
 +    const screen_switched = current_is_alternate != wrapper.last_screen_is_alternate;
 +    wrapper.last_screen_is_alternate = current_is_alternate;
-+    
++
 +    // When screen switches, we must fully reset the render state to avoid
 +    // stale cached cell data from the previous screen buffer.
 +    if (screen_switched) {
 +        wrapper.render_state.deinit(wrapper.alloc);
 +        wrapper.render_state = RenderState.empty;
 +    }
-+    
++
 +    wrapper.render_state.update(wrapper.alloc, &wrapper.terminal) catch return .full;
-+    
++
 +    // If screen switched, always return full dirty to force complete redraw
 +    if (screen_switched) {
 +        return .full;
 +    }
-+    
++
 +    return switch (wrapper.render_state.dirty) {
 +        .false => .none,
 +        .partial => .partial,
@@ -979,7 +1238,7 @@ index 000000000..73ae2e6fa
 +    return @intCast(wrapper.render_state.cursor.active.x);
 +}
 +
-+/// Get cursor Y position  
++/// Get cursor Y position
 +pub fn renderStateGetCursorY(ptr: ?*anyopaque) callconv(.c) c_int {
 +    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return 0));
 +    return @intCast(wrapper.render_state.cursor.active.y);
@@ -1207,8 +1466,8 @@ index 000000000..73ae2e6fa
 +pub fn hasMouseTracking(ptr: ?*anyopaque) callconv(.c) bool {
 +    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
 +    return wrapper.terminal.modes.get(.mouse_event_normal) or
-+           wrapper.terminal.modes.get(.mouse_event_button) or
-+           wrapper.terminal.modes.get(.mouse_event_any);
++        wrapper.terminal.modes.get(.mouse_event_button) or
++        wrapper.terminal.modes.get(.mouse_event_any);
 +}
 +
 +/// Query arbitrary terminal mode by number
@@ -1245,22 +1504,22 @@ index 000000000..73ae2e6fa
 +    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
 +    const rs = &wrapper.render_state;
 +    const cols = rs.cols;
-+    
++
 +    if (buf_size < cols) return -1;
 +    if (offset < 0) return -1;
-+    
++
 +    const scrollback_len = getScrollbackLength(ptr);
 +    if (offset >= scrollback_len) return -1;
-+    
++
 +    // Get the pin for this scrollback row
 +    // history point: y=0 is oldest, y=scrollback_len-1 is newest
 +    const pages = &wrapper.terminal.screens.active.pages;
 +    const pin = pages.pin(.{ .history = .{ .y = @intCast(offset) } }) orelse return -1;
-+    
++
 +    // Get cells for this row
 +    const cells = pin.cells(.all);
 +    const page = pin.node.data;
-+    
++
 +    // Fill output buffer
 +    for (0..cols) |x| {
 +        if (x >= cells.len) {
@@ -1279,15 +1538,15 @@ index 000000000..73ae2e6fa
 +            };
 +            continue;
 +        }
-+        
++
 +        const cell = &cells[x];
-+        
++
 +        // Get style from page styles (cell has style_id)
 +        const sty: Style = if (cell.style_id > 0)
 +            page.styles.get(page.memory, cell.style_id).*
 +        else
 +            .{};
-+        
++
 +        // Resolve colors
 +        const fg: color.RGB = switch (sty.fg_color) {
 +            .none => rs.colors.foreground,
@@ -1295,7 +1554,7 @@ index 000000000..73ae2e6fa
 +            .rgb => |rgb| rgb,
 +        };
 +        const bg: color.RGB = if (sty.bg(cell, &rs.colors.palette)) |rgb| rgb else rs.colors.background;
-+        
++
 +        // Build flags
 +        var flags: u8 = 0;
 +        if (sty.flags.bold) flags |= 1 << 0;
@@ -1391,11 +1650,11 @@ index 000000000..73ae2e6fa
 +pub fn isRowWrapped(ptr: ?*anyopaque, y: c_int) callconv(.c) bool {
 +    const wrapper: *const TerminalWrapper = @ptrCast(@alignCast(ptr orelse return false));
 +    const pages = &wrapper.terminal.screens.active.pages;
-+    
++
 +    // Get pin for this row in active area
 +    const pin = pages.pin(.{ .active = .{ .y = @intCast(y) } }) orelse return false;
 +    const rac = pin.rowAndCell();
-+    
++
 +    // wrap_continuation means this row continues from the previous row
 +    return rac.row.wrap_continuation;
 +}
@@ -1515,9 +1774,9 @@ index 000000000..73ae2e6fa
 +    const wrapper: *TerminalWrapper = @ptrCast(@alignCast(ptr orelse return -1));
 +    const len = @min(wrapper.response_buffer.items.len, buf_size);
 +    if (len == 0) return 0;
-+    
++
 +    @memcpy(out[0..len], wrapper.response_buffer.items[0..len]);
-+    
++
 +    // Remove consumed bytes from buffer
 +    if (len == wrapper.response_buffer.items.len) {
 +        wrapper.response_buffer.clearRetainingCapacity();
@@ -1530,7 +1789,7 @@ index 000000000..73ae2e6fa
 +        );
 +        wrapper.response_buffer.shrinkRetainingCapacity(wrapper.response_buffer.items.len - len);
 +    }
-+    
++
 +    return @intCast(len);
 +}
 +
@@ -1564,35 +1823,945 @@ index 000000000..73ae2e6fa
 +    try std.testing.expectEqual(@as(u32, 'l'), cells[3].codepoint);
 +    try std.testing.expectEqual(@as(u32, 'o'), cells[4].codepoint);
 +}
-diff --git a/src/terminal/Screen.zig b/src/terminal/Screen.zig
-index ba2af2473..b8be8f273 100644
---- a/src/terminal/Screen.zig
-+++ b/src/terminal/Screen.zig
-@@ -851,10 +851,19 @@ pub fn cursorDownScroll(self: *Screen) !void {
--        // Clear the new row so it gets our bg color. We only do this
--        // if we have a bg color at all.
--        if (self.cursor.style.bg_color != .none) {
-+        // Always clear the new row's cells. When pages.grow() extends an
-+        // existing page, the new row's cell memory may contain stale data
-+        // from previously erased rows. Without clearing, these stale cells
-+        // become visible when the row isn't fully overwritten, such as after
-+        // bare CRLF output with the default cursor style.
-+        {
-             const page: *Page = &page_pin.node.data;
-+            const row = self.cursor.page_row;
-+            const cells_offset = row.cells;
-+            const dirty = row.dirty;
-             self.clearCells(
-                 page,
--                self.cursor.page_row,
--                page.getCells(self.cursor.page_row),
-+                row,
-+                page.getCells(row),
-             );
-+            // Reset row-level metadata that clearCells does not touch while
-+            // preserving the backing cell offset and dirty state.
-+            row.* = .{ .cells = cells_offset, .dirty = dirty };
-         }
+diff --git a/src/terminal/checkpoint.zig b/src/terminal/checkpoint.zig
+new file mode 100644
+index 000000000..c23eed0d5
+--- /dev/null
++++ b/src/terminal/checkpoint.zig
+@@ -0,0 +1,933 @@
++//! Durable logical terminal checkpoint codec for the floegence Ghostty WASM fork.
++//!
++//! The format is deliberately independent of Zig struct and WASM memory layouts.
++//! It serializes terminal-owned logical values and reconstructs into a temporary
++//! Terminal so callers can atomically replace live state only after validation.
++
++const std = @import("std");
++const Allocator = std.mem.Allocator;
++
++const Terminal = @import("Terminal.zig");
++const Screen = @import("Screen.zig");
++const ScreenSet = @import("ScreenSet.zig");
++const pagepkg = @import("page.zig");
++const stylepkg = @import("style.zig");
++const hyperlink = @import("hyperlink.zig");
++const color = @import("color.zig");
++const modespkg = @import("modes.zig");
++const ansi = @import("ansi.zig");
++const charsets = @import("charsets.zig");
++const kitty = @import("kitty.zig");
++const ModeBacking = @typeInfo(modespkg.ModePacked).@"struct".backing_integer.?;
++
++pub const format_version: u16 = 1;
++pub const magic = "FLOE-GHOSTTY-CKPT";
++pub const engine_id = "floegence/ghostty-web@1858a594+ghostty@5714ed07";
++pub const header_len = magic.len + 2 + 2 + 4 + 4 + 8 + 8 + 8 + 8 + 32;
++pub const max_checkpoint_bytes: usize = 64 * 1024 * 1024;
++const max_dimension: u32 = 4096;
++const max_total_rows: u32 = 1_000_000;
++const max_string_bytes: u32 = 16 * 1024 * 1024;
++const max_grapheme_codepoints: u16 = 256;
++const max_explicit_screen_bytes: u64 = std.math.maxInt(u32);
++
++pub const Error = error{
++    InvalidFormat,
++    UnsupportedVersion,
++    ChecksumMismatch,
++    DimensionMismatch,
++    ResourceLimit,
++    StateInvariant,
++    OutOfMemory,
++};
++
++pub const Metadata = struct {
++    cols: u32,
++    rows: u32,
++    coordinates: Coordinates,
++    payload_len: usize,
++    checksum: [32]u8,
++};
++
++pub const Coordinates = struct {
++    history_sequence: u64 = 0,
++    geometry_generation: u64 = 0,
++    parser_epoch: u64 = 0,
++};
++
++pub const Decoded = struct {
++    terminal: Terminal,
++    response: []u8,
++
++    pub fn deinit(self: *Decoded, alloc: Allocator) void {
++        self.terminal.deinit(alloc);
++        alloc.free(self.response);
++        self.* = undefined;
++    }
++};
++
++const Encoder = struct {
++    alloc: Allocator,
++    bytes: std.ArrayList(u8) = .empty,
++
++    fn deinit(self: *Encoder) void {
++        self.bytes.deinit(self.alloc);
++    }
++
++    fn byte(self: *Encoder, value: u8) Error!void {
++        self.bytes.append(self.alloc, value) catch return error.OutOfMemory;
++    }
++
++    fn uint(self: *Encoder, comptime T: type, value: T) Error!void {
++        var buf: [@sizeOf(T)]u8 = undefined;
++        std.mem.writeInt(T, &buf, value, .little);
++        self.bytes.appendSlice(self.alloc, &buf) catch return error.OutOfMemory;
++    }
++
++    fn boolean(self: *Encoder, value: bool) Error!void {
++        try self.byte(@intFromBool(value));
++    }
++
++    fn slice(self: *Encoder, value: []const u8) Error!void {
++        if (value.len > max_string_bytes) return error.ResourceLimit;
++        try self.uint(u32, @intCast(value.len));
++        self.bytes.appendSlice(self.alloc, value) catch return error.OutOfMemory;
++    }
++};
++
++const Decoder = struct {
++    bytes: []const u8,
++    offset: usize = 0,
++
++    fn remaining(self: *const Decoder) usize {
++        return self.bytes.len - self.offset;
++    }
++
++    fn byte(self: *Decoder) Error!u8 {
++        if (self.remaining() < 1) return error.InvalidFormat;
++        defer self.offset += 1;
++        return self.bytes[self.offset];
++    }
++
++    fn uint(self: *Decoder, comptime T: type) Error!T {
++        if (self.remaining() < @sizeOf(T)) return error.InvalidFormat;
++        const value = std.mem.readInt(T, self.bytes[self.offset..][0..@sizeOf(T)], .little);
++        self.offset += @sizeOf(T);
++        return value;
++    }
++
++    fn boolean(self: *Decoder) Error!bool {
++        return switch (try self.byte()) {
++            0 => false,
++            1 => true,
++            else => error.InvalidFormat,
++        };
++    }
++
++    fn slice(self: *Decoder) Error![]const u8 {
++        const len = try self.uint(u32);
++        if (len > max_string_bytes or self.remaining() < len) return error.ResourceLimit;
++        const value = self.bytes[self.offset..][0..len];
++        self.offset += len;
++        return value;
++    }
++
++    fn finish(self: *const Decoder) Error!void {
++        if (self.offset != self.bytes.len) return error.InvalidFormat;
++    }
++};
++
++pub fn metadata(bytes: []const u8) Error!Metadata {
++    if (bytes.len < header_len or bytes.len > max_checkpoint_bytes) return error.InvalidFormat;
++    if (!std.mem.eql(u8, bytes[0..magic.len], magic)) return error.InvalidFormat;
++
++    var dec: Decoder = .{ .bytes = bytes, .offset = magic.len };
++    if (try dec.uint(u16) != format_version) return error.UnsupportedVersion;
++    if (try dec.uint(u16) != header_len) return error.InvalidFormat;
++    const cols = try dec.uint(u32);
++    const rows = try dec.uint(u32);
++    const coordinates: Coordinates = .{
++        .history_sequence = try dec.uint(u64),
++        .geometry_generation = try dec.uint(u64),
++        .parser_epoch = try dec.uint(u64),
++    };
++    const payload_len = try dec.uint(u64);
++    if (cols == 0 or rows == 0 or cols > max_dimension or rows > max_dimension) return error.ResourceLimit;
++    if (payload_len > max_checkpoint_bytes or payload_len != bytes.len - header_len) return error.InvalidFormat;
++    var expected: [32]u8 = undefined;
++    @memcpy(&expected, bytes[dec.offset..][0..32]);
++    dec.offset += 32;
++
++    var actual: [32]u8 = undefined;
++    std.crypto.hash.sha2.Sha256.hash(bytes[header_len..], &actual, .{});
++    if (!std.crypto.timing_safe.eql([32]u8, expected, actual)) return error.ChecksumMismatch;
++    return .{
++        .cols = cols,
++        .rows = rows,
++        .coordinates = coordinates,
++        .payload_len = @intCast(payload_len),
++        .checksum = expected,
++    };
++}
++
++pub fn capture(
++    alloc: Allocator,
++    terminal: *const Terminal,
++    response: []const u8,
++    coordinates: Coordinates,
++) Error![]u8 {
++    var payload: Encoder = .{ .alloc = alloc };
++    defer payload.deinit();
++
++    try payload.slice(engine_id);
++    try payload.uint(u32, terminal.cols);
++    try payload.uint(u32, terminal.rows);
++    try payload.uint(u32, terminal.width_px);
++    try payload.uint(u32, terminal.height_px);
++    try payload.byte(@intCast(@intFromEnum(terminal.status_display)));
++    try payload.uint(u32, terminal.scrolling_region.top);
++    try payload.uint(u32, terminal.scrolling_region.bottom);
++    try payload.uint(u32, terminal.scrolling_region.left);
++    try payload.uint(u32, terminal.scrolling_region.right);
++    try payload.slice(terminal.pwd.items);
++    try encodeColors(&payload, terminal.colors);
++    try payload.boolean(terminal.previous_char != null);
++    if (terminal.previous_char) |cp| try payload.uint(u32, cp);
++    try payload.uint(u64, @intCast(@as(ModeBacking, @bitCast(terminal.modes.values))));
++    try payload.uint(u64, @intCast(@as(ModeBacking, @bitCast(terminal.modes.saved))));
++    try payload.uint(u64, @intCast(@as(ModeBacking, @bitCast(terminal.modes.default))));
++    try payload.uint(u32, @intCast(@intFromEnum(terminal.mouse_shape)));
++    try payload.boolean(terminal.flags.shell_redraws_prompt);
++    try payload.boolean(terminal.flags.modify_other_keys_2);
++    try payload.byte(@intFromEnum(terminal.flags.mouse_event));
++    try payload.byte(@intFromEnum(terminal.flags.mouse_format));
++    try payload.byte(@intFromEnum(terminal.flags.mouse_shift_capture));
++    try payload.boolean(terminal.flags.focused);
++    try payload.boolean(terminal.flags.password_input);
++    try payload.boolean(terminal.flags.selection_scroll);
++    for (0..terminal.cols) |col| try payload.boolean(terminal.tabstops.get(col));
++    try payload.byte(@intFromEnum(terminal.screens.active_key));
++    try encodeScreen(&payload, terminal.screens.get(.primary).?);
++    try payload.boolean(terminal.screens.get(.alternate) != null);
++    if (terminal.screens.get(.alternate)) |screen| try encodeScreen(&payload, screen);
++    try payload.slice(response);
++
++    if (payload.bytes.items.len + header_len > max_checkpoint_bytes) return error.ResourceLimit;
++    var checksum: [32]u8 = undefined;
++    std.crypto.hash.sha2.Sha256.hash(payload.bytes.items, &checksum, .{});
++
++    var out: Encoder = .{ .alloc = alloc };
++    errdefer out.deinit();
++    out.bytes.appendSlice(alloc, magic) catch return error.OutOfMemory;
++    try out.uint(u16, format_version);
++    try out.uint(u16, header_len);
++    try out.uint(u32, terminal.cols);
++    try out.uint(u32, terminal.rows);
++    try out.uint(u64, coordinates.history_sequence);
++    try out.uint(u64, coordinates.geometry_generation);
++    try out.uint(u64, coordinates.parser_epoch);
++    try out.uint(u64, payload.bytes.items.len);
++    out.bytes.appendSlice(alloc, &checksum) catch return error.OutOfMemory;
++    out.bytes.appendSlice(alloc, payload.bytes.items) catch return error.OutOfMemory;
++    return out.bytes.toOwnedSlice(alloc) catch return error.OutOfMemory;
++}
++
++pub fn decode(
++    alloc: Allocator,
++    bytes: []const u8,
++    expected_cols: ?u32,
++    expected_rows: ?u32,
++    expected_coordinates: ?Coordinates,
++) Error!Decoded {
++    const meta = try metadata(bytes);
++    if (expected_cols) |cols| if (cols != meta.cols) return error.DimensionMismatch;
++    if (expected_rows) |rows| if (rows != meta.rows) return error.DimensionMismatch;
++    if (expected_coordinates) |expected| {
++        if (expected.history_sequence != meta.coordinates.history_sequence or
++            expected.geometry_generation != meta.coordinates.geometry_generation or
++            expected.parser_epoch != meta.coordinates.parser_epoch) return error.StateInvariant;
++    }
++
++    var dec: Decoder = .{ .bytes = bytes[header_len..] };
++    if (!std.mem.eql(u8, try dec.slice(), engine_id)) return error.UnsupportedVersion;
++    const cols = try dec.uint(u32);
++    const rows = try dec.uint(u32);
++    if (cols != meta.cols or rows != meta.rows) return error.InvalidFormat;
++
++    var terminal = Terminal.init(alloc, .{
++        .cols = @intCast(cols),
++        .rows = @intCast(rows),
++        .max_scrollback = std.math.maxInt(usize),
++    }) catch return error.OutOfMemory;
++    errdefer terminal.deinit(alloc);
++
++    terminal.width_px = try dec.uint(u32);
++    terminal.height_px = try dec.uint(u32);
++    terminal.status_display = std.meta.intToEnum(ansi.StatusDisplay, try dec.byte()) catch return error.StateInvariant;
++    const scrolling_top = try dec.uint(u32);
++    const scrolling_bottom = try dec.uint(u32);
++    const scrolling_left = try dec.uint(u32);
++    const scrolling_right = try dec.uint(u32);
++    if (scrolling_top >= scrolling_bottom or scrolling_bottom >= rows or
++        scrolling_left >= scrolling_right or scrolling_right >= cols) return error.StateInvariant;
++    terminal.scrolling_region = .{
++        .top = @intCast(scrolling_top),
++        .bottom = @intCast(scrolling_bottom),
++        .left = @intCast(scrolling_left),
++        .right = @intCast(scrolling_right),
++    };
++    const pwd = try dec.slice();
++    terminal.pwd.appendSlice(alloc, pwd) catch return error.OutOfMemory;
++    terminal.colors = try decodeColors(&dec);
++    terminal.previous_char = if (try dec.boolean()) previous: {
++        const cp = try dec.uint(u32);
++        if (cp > 0x10ffff or (cp >= 0xd800 and cp <= 0xdfff)) return error.StateInvariant;
++        break :previous @intCast(cp);
++    } else null;
++    terminal.modes.values = @bitCast(try decodeModeBacking(&dec));
++    terminal.modes.saved = @bitCast(try decodeModeBacking(&dec));
++    terminal.modes.default = @bitCast(try decodeModeBacking(&dec));
++    const mouse_shape_raw = try dec.uint(u32);
++    if (mouse_shape_raw > std.math.maxInt(c_int)) return error.StateInvariant;
++    terminal.mouse_shape = std.meta.intToEnum(
++        @TypeOf(terminal.mouse_shape),
++        @as(c_int, @intCast(mouse_shape_raw)),
++    ) catch return error.StateInvariant;
++    terminal.flags.shell_redraws_prompt = try dec.boolean();
++    terminal.flags.modify_other_keys_2 = try dec.boolean();
++    terminal.flags.mouse_event = std.meta.intToEnum(Terminal.MouseEvents, try dec.byte()) catch return error.StateInvariant;
++    terminal.flags.mouse_format = std.meta.intToEnum(Terminal.MouseFormat, try dec.byte()) catch return error.StateInvariant;
++    terminal.flags.mouse_shift_capture = std.meta.intToEnum(
++        @TypeOf(terminal.flags.mouse_shift_capture),
++        try dec.byte(),
++    ) catch return error.StateInvariant;
++    terminal.flags.focused = try dec.boolean();
++    terminal.flags.password_input = try dec.boolean();
++    terminal.flags.selection_scroll = try dec.boolean();
++    terminal.tabstops.reset(0);
++    for (0..terminal.cols) |col| if (try dec.boolean()) terminal.tabstops.set(col);
++
++    const active_key = std.meta.intToEnum(ScreenSet.Key, try dec.byte()) catch return error.StateInvariant;
++    try decodeScreen(alloc, &terminal, terminal.screens.get(.primary).?, &dec);
++    const has_alternate = try dec.boolean();
++    if (has_alternate) {
++        const alternate = terminal.screens.getInit(alloc, .alternate, .{
++            .cols = terminal.cols,
++            .rows = terminal.rows,
++            .max_scrollback = 0,
++        }) catch return error.OutOfMemory;
++        try decodeScreen(alloc, &terminal, alternate, &dec);
++    } else if (active_key == .alternate) return error.StateInvariant;
++    terminal.screens.switchTo(active_key);
++
++    const response_src = try dec.slice();
++    const response = alloc.dupe(u8, response_src) catch return error.OutOfMemory;
++    errdefer alloc.free(response);
++    try dec.finish();
++    return .{ .terminal = terminal, .response = response };
++}
++
++fn encodeColors(enc: *Encoder, colors: Terminal.Colors) Error!void {
++    try encodeDynamicRgb(enc, colors.background);
++    try encodeDynamicRgb(enc, colors.foreground);
++    try encodeDynamicRgb(enc, colors.cursor);
++    for (colors.palette.original) |rgb| try encodeRgb(enc, rgb);
++    for (colors.palette.current) |rgb| try encodeRgb(enc, rgb);
++}
++
++fn decodeColors(dec: *Decoder) Error!Terminal.Colors {
++    var result: Terminal.Colors = .default;
++    result.background = try decodeDynamicRgb(dec);
++    result.foreground = try decodeDynamicRgb(dec);
++    result.cursor = try decodeDynamicRgb(dec);
++    for (&result.palette.original) |*rgb| rgb.* = try decodeRgb(dec);
++    result.palette.current = result.palette.original;
++    result.palette.resetAll();
++    for (0..256) |i| {
++        const rgb = try decodeRgb(dec);
++        if (rgb != result.palette.original[i]) result.palette.set(@intCast(i), rgb);
++    }
++    return result;
++}
++
++fn encodeDynamicRgb(enc: *Encoder, value: color.DynamicRGB) Error!void {
++    try enc.boolean(value.default != null);
++    if (value.default) |rgb| try encodeRgb(enc, rgb);
++    try enc.boolean(value.override != null);
++    if (value.override) |rgb| try encodeRgb(enc, rgb);
++}
++
++fn decodeDynamicRgb(dec: *Decoder) Error!color.DynamicRGB {
++    return .{
++        .default = if (try dec.boolean()) try decodeRgb(dec) else null,
++        .override = if (try dec.boolean()) try decodeRgb(dec) else null,
++    };
++}
++
++fn encodeRgb(enc: *Encoder, rgb: color.RGB) Error!void {
++    try enc.byte(rgb.r);
++    try enc.byte(rgb.g);
++    try enc.byte(rgb.b);
++}
++
++fn decodeRgb(dec: *Decoder) Error!color.RGB {
++    return .{ .r = try dec.byte(), .g = try dec.byte(), .b = try dec.byte() };
++}
++
++fn decodeModeBacking(dec: *Decoder) Error!ModeBacking {
++    const raw = try dec.uint(u64);
++    if (@bitSizeOf(ModeBacking) < 64 and raw > std.math.maxInt(ModeBacking))
++        return error.StateInvariant;
++    return @truncate(raw);
++}
++
++fn encodeStyle(enc: *Encoder, value: stylepkg.Style) Error!void {
++    try encodeStyleColor(enc, value.fg_color);
++    try encodeStyleColor(enc, value.bg_color);
++    try encodeStyleColor(enc, value.underline_color);
++    try enc.uint(u16, @bitCast(value.flags));
++}
++
++fn decodeStyle(dec: *Decoder) Error!stylepkg.Style {
++    var result: stylepkg.Style = .{};
++    result.fg_color = try decodeStyleColor(dec);
++    result.bg_color = try decodeStyleColor(dec);
++    result.underline_color = try decodeStyleColor(dec);
++    result.flags = @bitCast(try dec.uint(u16));
++    return result;
++}
++
++fn encodeStyleColor(enc: *Encoder, value: stylepkg.Style.Color) Error!void {
++    switch (value) {
++        .none => try enc.byte(0),
++        .palette => |idx| {
++            try enc.byte(1);
++            try enc.byte(idx);
++        },
++        .rgb => |rgb| {
++            try enc.byte(2);
++            try encodeRgb(enc, rgb);
++        },
++    }
++}
++
++fn decodeStyleColor(dec: *Decoder) Error!stylepkg.Style.Color {
++    return switch (try dec.byte()) {
++        0 => .none,
++        1 => .{ .palette = try dec.byte() },
++        2 => .{ .rgb = try decodeRgb(dec) },
++        else => error.StateInvariant,
++    };
++}
++
++fn encodeCharset(enc: *Encoder, value: Screen.CharsetState) Error!void {
++    inline for (.{ charsets.Slots.G0, charsets.Slots.G1, charsets.Slots.G2, charsets.Slots.G3 }) |slot|
++        try enc.byte(@intCast(@intFromEnum(value.charsets.get(slot))));
++    try enc.byte(@intCast(@intFromEnum(value.gl)));
++    try enc.byte(@intCast(@intFromEnum(value.gr)));
++    try enc.boolean(value.single_shift != null);
++    if (value.single_shift) |slot| try enc.byte(@intCast(@intFromEnum(slot)));
++}
++
++fn decodeCharset(dec: *Decoder) Error!Screen.CharsetState {
++    var result: Screen.CharsetState = .{};
++    inline for (.{ charsets.Slots.G0, charsets.Slots.G1, charsets.Slots.G2, charsets.Slots.G3 }) |slot|
++        result.charsets.set(slot, std.meta.intToEnum(charsets.Charset, try dec.byte()) catch return error.StateInvariant);
++    result.gl = std.meta.intToEnum(charsets.Slots, try dec.byte()) catch return error.StateInvariant;
++    result.gr = std.meta.intToEnum(charsets.Slots, try dec.byte()) catch return error.StateInvariant;
++    result.single_shift = if (try dec.boolean())
++        std.meta.intToEnum(charsets.Slots, try dec.byte()) catch return error.StateInvariant
++    else
++        null;
++    return result;
++}
++
++fn encodeCursor(enc: *Encoder, cursor: Screen.Cursor) Error!void {
++    try enc.uint(u32, cursor.x);
++    try enc.uint(u32, cursor.y);
++    try enc.byte(@intFromEnum(cursor.cursor_style));
++    try enc.boolean(cursor.pending_wrap);
++    try enc.boolean(cursor.protected);
++    try encodeStyle(enc, cursor.style);
++    try enc.uint(u32, cursor.hyperlink_implicit_id);
++    try enc.boolean(cursor.hyperlink != null);
++    if (cursor.hyperlink) |link| try encodeHyperlink(enc, link.*);
++}
++
++fn encodeSavedCursor(enc: *Encoder, cursor: ?Screen.SavedCursor) Error!void {
++    try enc.boolean(cursor != null);
++    if (cursor) |value| {
++        try enc.uint(u32, value.x);
++        try enc.uint(u32, value.y);
++        try encodeStyle(enc, value.style);
++        try enc.boolean(value.protected);
++        try enc.boolean(value.pending_wrap);
++        try enc.boolean(value.origin);
++        try encodeCharset(enc, value.charset);
++    }
++}
++
++fn encodeHyperlink(enc: *Encoder, link: hyperlink.Hyperlink) Error!void {
++    switch (link.id) {
++        .implicit => |id| {
++            try enc.byte(1);
++            try enc.uint(u32, id);
++        },
++        .explicit => |id| {
++            try enc.byte(2);
++            try enc.slice(id);
++        },
++    }
++    try enc.slice(link.uri);
++}
++
++fn encodeScreen(enc: *Encoder, screen: *const Screen) Error!void {
++    if (screen.pages.total_rows > max_total_rows) return error.ResourceLimit;
++    try enc.boolean(screen.no_scrollback);
++    try enc.uint(u64, screen.pages.explicit_max_size);
++    try enc.uint(u32, @intCast(screen.pages.total_rows));
++    try encodeCursor(enc, screen.cursor);
++    try encodeSavedCursor(enc, screen.saved_cursor);
++    try encodeCharset(enc, screen.charset);
++    try enc.byte(@intFromEnum(screen.protected_mode));
++    for (screen.kitty_keyboard.flags) |flags| try enc.byte(flags.int());
++    try enc.byte(screen.kitty_keyboard.idx);
++
++    var rows = screen.pages.rowIterator(.right_down, .{ .screen = .{} }, null);
++    while (rows.next()) |pin| {
++        const rac = pin.rowAndCell();
++        try enc.boolean(rac.row.wrap);
++        try enc.boolean(rac.row.wrap_continuation);
++        try enc.byte(@intFromEnum(rac.row.semantic_prompt));
++        try enc.boolean(rac.row.kitty_virtual_placeholder);
++        const cells = pin.cells(.all);
++        if (cells.len != screen.pages.cols) return error.StateInvariant;
++        for (cells) |*cell| try encodeCell(enc, pin, cell);
++    }
++}
++
++fn encodeCell(enc: *Encoder, pin: @import("PageList.zig").Pin, cell: *const pagepkg.Cell) Error!void {
++    try enc.byte(@intFromEnum(cell.content_tag));
++    const content: u32 = switch (cell.content_tag) {
++        .codepoint, .codepoint_grapheme => cell.content.codepoint,
++        .bg_color_palette => cell.content.color_palette,
++        .bg_color_rgb => (@as(u32, cell.content.color_rgb.r) << 16) | (@as(u32, cell.content.color_rgb.g) << 8) | cell.content.color_rgb.b,
++    };
++    try enc.uint(u32, content);
++    try enc.byte(@intFromEnum(cell.wide));
++    try enc.boolean(cell.protected);
++    try encodeStyle(enc, pin.style(cell));
++    const grapheme = pin.grapheme(cell) orelse &.{};
++    if (grapheme.len > max_grapheme_codepoints) return error.ResourceLimit;
++    try enc.uint(u16, @intCast(grapheme.len));
++    for (grapheme) |cp| try enc.uint(u32, cp);
++    try enc.boolean(cell.hyperlink);
++    if (cell.hyperlink) {
++        const page = &pin.node.data;
++        const id = page.lookupHyperlink(cell) orelse return error.StateInvariant;
++        const entry = page.hyperlink_set.get(page.memory, id);
++        const logical: hyperlink.Hyperlink = .{
++            .id = switch (entry.id) {
++                .implicit => |value| .{ .implicit = value },
++                .explicit => |value| .{ .explicit = value.slice(page.memory) },
++            },
++            .uri = entry.uri.slice(page.memory),
++        };
++        try encodeHyperlink(enc, logical);
++    }
++}
++
++fn decodeScreen(alloc: Allocator, terminal: *Terminal, screen: *Screen, dec: *Decoder) Error!void {
++    const no_scrollback = try dec.boolean();
++    const explicit_max_size = try dec.uint(u64);
++    if (explicit_max_size > max_explicit_screen_bytes or
++        explicit_max_size > std.math.maxInt(usize)) return error.ResourceLimit;
++    const total_rows = try dec.uint(u32);
++    if (total_rows < terminal.rows or total_rows > max_total_rows) return error.ResourceLimit;
++
++    const cursor_x = try dec.uint(u32);
++    const cursor_y = try dec.uint(u32);
++    const cursor_style = std.meta.intToEnum(Screen.CursorStyle, try dec.byte()) catch return error.StateInvariant;
++    const pending_wrap = try dec.boolean();
++    const cursor_protected = try dec.boolean();
++    const cursor_pen = try decodeStyle(dec);
++    const hyperlink_implicit_id = try dec.uint(u32);
++    const has_cursor_link = try dec.boolean();
++    const cursor_link = if (has_cursor_link) try decodeOwnedHyperlink(alloc, dec) else null;
++    defer if (cursor_link) |*link| link.deinit(alloc);
++
++    const saved = try decodeSavedCursor(dec, terminal.cols, terminal.rows);
++    const charset = try decodeCharset(dec);
++    const protected_mode = std.meta.intToEnum(ansi.ProtectedMode, try dec.byte()) catch return error.StateInvariant;
++    var kitty_keyboard: kitty.KeyFlagStack = .{};
++    for (&kitty_keyboard.flags) |*flags| {
++        const raw = try dec.byte();
++        if (raw > std.math.maxInt(u5)) return error.StateInvariant;
++        flags.* = @bitCast(@as(u5, @intCast(raw)));
++    }
++    const kitty_idx = try dec.byte();
++    if (kitty_idx >= kitty_keyboard.flags.len) return error.StateInvariant;
++    kitty_keyboard.idx = @intCast(kitty_idx);
++
++    while (screen.pages.total_rows < total_rows) _ = screen.pages.grow() catch return error.OutOfMemory;
++    if (screen.pages.total_rows != total_rows) return error.StateInvariant;
++
++    for (0..total_rows) |y| {
++        var pin = screen.pages.pin(.{ .screen = .{ .y = @intCast(y) } }) orelse return error.StateInvariant;
++        var rac = pin.rowAndCell();
++        rac.row.wrap = try dec.boolean();
++        rac.row.wrap_continuation = try dec.boolean();
++        rac.row.semantic_prompt = std.meta.intToEnum(pagepkg.Row.SemanticPrompt, try dec.byte()) catch return error.StateInvariant;
++        rac.row.kitty_virtual_placeholder = try dec.boolean();
++        for (0..terminal.cols) |x| {
++            try decodeCell(screen, dec, @intCast(y), @intCast(x));
++            pin = screen.pages.pin(.{ .screen = .{ .y = @intCast(y), .x = @intCast(x) } }) orelse return error.StateInvariant;
++            rac = pin.rowAndCell();
++            rac.row.dirty = true;
++        }
++    }
++
++    if (cursor_x >= terminal.cols or cursor_y >= terminal.rows) return error.StateInvariant;
++    // Growing and filling the page list leaves the initial cursor pin on its
++    // old page. Reload it into the active viewport before applying the
++    // serialized point; otherwise subsequent writes can mutate invisible
++    // history rows.
++    screen.cursorReload();
++    screen.cursorAbsolute(@intCast(cursor_x), @intCast(cursor_y));
++    screen.cursor.cursor_style = cursor_style;
++    screen.cursor.pending_wrap = pending_wrap;
++    screen.cursor.protected = cursor_protected;
++    screen.cursor.style = cursor_pen;
++    screen.cursor.style_id = addCursorStyle(screen, cursor_pen) catch return error.OutOfMemory;
++    screen.cursor.hyperlink_implicit_id = hyperlink_implicit_id;
++    if (cursor_link) |link| {
++        switch (link.id) {
++            .implicit => |id| screen.cursor.hyperlink_implicit_id = id,
++            .explicit => {},
++        }
++        screen.startHyperlink(link.uri, switch (link.id) {
++            .explicit => |id| id,
++            .implicit => null,
++        }) catch return error.OutOfMemory;
++        screen.cursor.hyperlink_implicit_id = hyperlink_implicit_id;
++    }
++    screen.saved_cursor = saved;
++    screen.charset = charset;
++    screen.protected_mode = protected_mode;
++    screen.kitty_keyboard = kitty_keyboard;
++    screen.no_scrollback = no_scrollback;
++    screen.pages.explicit_max_size = @intCast(explicit_max_size);
++    screen.pages.clearDirty();
++    var node = screen.pages.pages.first;
++    while (node) |page| : (node = page.next) page.data.dirty = true;
++}
++
++fn decodeSavedCursor(dec: *Decoder, cols: u32, rows: u32) Error!?Screen.SavedCursor {
++    if (!try dec.boolean()) return null;
++    const x = try dec.uint(u32);
++    const y = try dec.uint(u32);
++    if (x >= cols or y >= rows) return error.StateInvariant;
++    return .{
++        .x = @intCast(x),
++        .y = @intCast(y),
++        .style = try decodeStyle(dec),
++        .protected = try dec.boolean(),
++        .pending_wrap = try dec.boolean(),
++        .origin = try dec.boolean(),
++        .charset = try decodeCharset(dec),
++    };
++}
++
++fn decodeOwnedHyperlink(alloc: Allocator, dec: *Decoder) Error!hyperlink.Hyperlink {
++    const tag = try dec.byte();
++    const id: hyperlink.Hyperlink.Id = switch (tag) {
++        1 => .{ .implicit = try dec.uint(u32) },
++        2 => .{ .explicit = alloc.dupe(u8, try dec.slice()) catch return error.OutOfMemory },
++        else => return error.StateInvariant,
++    };
++    errdefer switch (id) {
++        .implicit => {},
++        .explicit => |value| alloc.free(value),
++    };
++    const uri = alloc.dupe(u8, try dec.slice()) catch return error.OutOfMemory;
++    return .{ .id = id, .uri = uri };
++}
++
++fn decodeCell(screen: *Screen, dec: *Decoder, y: u32, x: u32) Error!void {
++    const content_tag = std.meta.intToEnum(pagepkg.Cell.ContentTag, try dec.byte()) catch return error.StateInvariant;
++    const content = try dec.uint(u32);
++    const wide = std.meta.intToEnum(pagepkg.Cell.Wide, try dec.byte()) catch return error.StateInvariant;
++    const protected = try dec.boolean();
++    const cell_style = try decodeStyle(dec);
++    const grapheme_len = try dec.uint(u16);
++    if (grapheme_len > max_grapheme_codepoints) return error.ResourceLimit;
++    var grapheme_buf: [max_grapheme_codepoints]u21 = undefined;
++    for (grapheme_buf[0..grapheme_len]) |*cp| {
++        const value = try dec.uint(u32);
++        if (value > 0x10ffff or (value >= 0xd800 and value <= 0xdfff)) return error.StateInvariant;
++        cp.* = @intCast(value);
++    }
++    const has_link = try dec.boolean();
++    const link = if (has_link) try decodeOwnedHyperlink(screen.alloc, dec) else null;
++    defer if (link) |*value| value.deinit(screen.alloc);
++
++    while (true) {
++        const pin = screen.pages.pin(.{ .screen = .{ .y = @intCast(y), .x = @intCast(x) } }) orelse return error.StateInvariant;
++        const rac = pin.rowAndCell();
++        var cell: pagepkg.Cell = @bitCast(@as(u64, 0));
++        // Ghostty's managed grapheme API requires a plain codepoint cell and
++        // promotes it to codepoint_grapheme only after the backing data exists.
++        cell.content_tag = if (content_tag == .codepoint_grapheme) .codepoint else content_tag;
++        switch (content_tag) {
++            .codepoint, .codepoint_grapheme => {
++                if (content > 0x10ffff or (content >= 0xd800 and content <= 0xdfff)) return error.StateInvariant;
++                cell.content = .{ .codepoint = @intCast(content) };
++                if (content_tag == .codepoint_grapheme and (content == 0 or grapheme_len == 0)) return error.StateInvariant;
++                if (content_tag == .codepoint and grapheme_len != 0) return error.StateInvariant;
++            },
++            .bg_color_palette => cell.content = .{ .color_palette = @truncate(content) },
++            .bg_color_rgb => cell.content = .{ .color_rgb = .{ .r = @truncate(content >> 16), .g = @truncate(content >> 8), .b = @truncate(content) } },
++        }
++        cell.wide = wide;
++        cell.protected = protected;
++        rac.cell.* = cell;
++
++        if (!cell_style.default()) {
++            rac.cell.style_id = pin.node.data.styles.add(pin.node.data.memory, cell_style) catch |err| switch (err) {
++                error.OutOfMemory, error.NeedsRehash => {
++                    _ = screen.adjustCapacity(pin.node, .{ .styles = pin.node.data.capacity.styles * 2 }) catch return error.OutOfMemory;
++                    continue;
++                },
++            };
++            rac.row.styled = true;
++        }
++        if (grapheme_len > 0) {
++            pin.node.data.setGraphemes(rac.row, rac.cell, grapheme_buf[0..grapheme_len]) catch {
++                _ = screen.adjustCapacity(pin.node, .{ .grapheme_bytes = pin.node.data.capacity.grapheme_bytes * 2 }) catch return error.OutOfMemory;
++                continue;
++            };
++        }
++        if (link) |logical| {
++            const id = pin.node.data.insertHyperlink(logical) catch {
++                _ = screen.adjustCapacity(pin.node, .{
++                    .hyperlink_bytes = pin.node.data.capacity.hyperlink_bytes * 2,
++                    .string_bytes = pin.node.data.capacity.string_bytes * 2,
++                }) catch return error.OutOfMemory;
++                continue;
++            };
++            pin.node.data.setHyperlink(rac.row, rac.cell, id) catch {
++                _ = screen.adjustCapacity(pin.node, .{ .hyperlink_bytes = pin.node.data.capacity.hyperlink_bytes * 2 }) catch return error.OutOfMemory;
++                continue;
++            };
++        }
++        return;
++    }
++}
++
++fn addCursorStyle(screen: *Screen, value: stylepkg.Style) !stylepkg.Id {
++    if (value.default()) return stylepkg.default_id;
++    while (true) {
++        const node = screen.cursor.page_pin.node;
++        return node.data.styles.add(node.data.memory, value) catch {
++            _ = try screen.adjustCapacity(node, .{ .styles = node.data.capacity.styles * 2 });
++            continue;
++        };
++    }
++}
++
++test "checkpoint rejects corrupt envelope before constructing state" {
++    const alloc = std.testing.allocator;
++    var terminal = try Terminal.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 1024 * 1024 });
++    defer terminal.deinit(alloc);
++    const bytes = try capture(alloc, &terminal, &.{}, .{});
++    defer alloc.free(bytes);
++    var corrupt = try alloc.dupe(u8, bytes);
++    defer alloc.free(corrupt);
++    corrupt[header_len] ^= 0xff;
++    try std.testing.expectError(error.ChecksumMismatch, decode(alloc, corrupt, 80, 24, null));
++}
++
++test "checkpoint round trips logical terminal state" {
++    const alloc = std.testing.allocator;
++    var terminal = try Terminal.init(alloc, .{ .cols = 20, .rows = 5, .max_scrollback = 1024 * 1024 });
++    defer terminal.deinit(alloc);
++    var stream = terminal.vtStream();
++    defer stream.deinit();
++    try stream.nextSlice("one\r\ntwo\r\n\x1b[3;4H\x1b[1;38;5;201m界e\u{301}");
++    const bytes = try capture(alloc, &terminal, "\x1b[0n", .{});
++    defer alloc.free(bytes);
++    var restored = try decode(alloc, bytes, 20, 5, null);
++    defer restored.deinit(alloc);
++    const bytes2 = try capture(alloc, &restored.terminal, restored.response, .{});
++    defer alloc.free(bytes2);
++    try std.testing.expectEqualSlices(u8, bytes, bytes2);
++}
++
++fn testPrimaryExplicitMaxOffset(bytes: []const u8) Error!usize {
++    const meta = try metadata(bytes);
++    var dec: Decoder = .{ .bytes = bytes[header_len..] };
++    _ = try dec.slice();
++    _ = try dec.uint(u32);
++    _ = try dec.uint(u32);
++    _ = try dec.uint(u32);
++    _ = try dec.uint(u32);
++    _ = try dec.byte();
++    _ = try dec.uint(u32);
++    _ = try dec.uint(u32);
++    _ = try dec.uint(u32);
++    _ = try dec.uint(u32);
++    _ = try dec.slice();
++    _ = try decodeColors(&dec);
++    if (try dec.boolean()) _ = try dec.uint(u32);
++    _ = try dec.uint(u64);
++    _ = try dec.uint(u64);
++    _ = try dec.uint(u64);
++    _ = try dec.uint(u32);
++    _ = try dec.boolean();
++    _ = try dec.boolean();
++    _ = try dec.byte();
++    _ = try dec.byte();
++    _ = try dec.byte();
++    _ = try dec.boolean();
++    _ = try dec.boolean();
++    _ = try dec.boolean();
++    for (0..meta.cols) |_| _ = try dec.boolean();
++    _ = try dec.byte();
++    _ = try dec.boolean();
++    return header_len + dec.offset;
++}
++
++const TestTerminalOffsets = struct {
++    mouse_shape: usize,
++    mouse_shift_capture: usize,
++};
++
++fn testTerminalOffsets(bytes: []const u8) Error!TestTerminalOffsets {
++    var dec: Decoder = .{ .bytes = bytes[header_len..] };
++    _ = try dec.slice();
++    for (0..4) |_| _ = try dec.uint(u32);
++    _ = try dec.byte();
++    for (0..4) |_| _ = try dec.uint(u32);
++    _ = try dec.slice();
++    _ = try decodeColors(&dec);
++    if (try dec.boolean()) _ = try dec.uint(u32);
++    for (0..3) |_| _ = try dec.uint(u64);
++    const mouse_shape = header_len + dec.offset;
++    _ = try dec.uint(u32);
++    _ = try dec.boolean();
++    _ = try dec.boolean();
++    _ = try dec.byte();
++    _ = try dec.byte();
++    const mouse_shift_capture = header_len + dec.offset;
++    return .{ .mouse_shape = mouse_shape, .mouse_shift_capture = mouse_shift_capture };
++}
++
++const TestScreenOffsets = struct {
++    saved_cursor_x: usize,
++    kitty_flags: usize,
++};
++
++fn testScreenOffsets(alloc: Allocator, bytes: []const u8) Error!TestScreenOffsets {
++    const explicit_max = try testPrimaryExplicitMaxOffset(bytes);
++    var dec: Decoder = .{ .bytes = bytes[header_len..], .offset = explicit_max - header_len };
++    _ = try dec.uint(u64);
++    _ = try dec.uint(u32);
++    _ = try dec.uint(u32);
++    _ = try dec.uint(u32);
++    _ = try dec.byte();
++    _ = try dec.boolean();
++    _ = try dec.boolean();
++    _ = try decodeStyle(&dec);
++    _ = try dec.uint(u32);
++    if (try dec.boolean()) {
++        var link = try decodeOwnedHyperlink(alloc, &dec);
++        link.deinit(alloc);
++    }
++    if (!try dec.boolean()) return error.StateInvariant;
++    const saved_cursor_x = header_len + dec.offset;
++    _ = try decodeSavedCursorBody(&dec);
++    _ = try decodeCharset(&dec);
++    _ = try dec.byte();
++    return .{ .saved_cursor_x = saved_cursor_x, .kitty_flags = header_len + dec.offset };
++}
++
++fn decodeSavedCursorBody(dec: *Decoder) Error!Screen.SavedCursor {
++    return .{
++        .x = @intCast(try dec.uint(u32)),
++        .y = @intCast(try dec.uint(u32)),
++        .style = try decodeStyle(dec),
++        .protected = try dec.boolean(),
++        .pending_wrap = try dec.boolean(),
++        .origin = try dec.boolean(),
++        .charset = try decodeCharset(dec),
++    };
++}
++
++fn testRewriteChecksum(bytes: []u8) void {
++    std.crypto.hash.sha2.Sha256.hash(
++        bytes[header_len..],
++        bytes[header_len - 32 ..][0..32],
++        .{},
++    );
++}
++
++test "checkpoint rejects oversized integer fields without trapping" {
++    const alloc = std.testing.allocator;
++    var terminal = try Terminal.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 1024 * 1024 });
++    defer terminal.deinit(alloc);
++    const original = try capture(alloc, &terminal, &.{}, .{});
++    defer alloc.free(original);
++
++    var invalid_region = try alloc.dupe(u8, original);
++    defer alloc.free(invalid_region);
++    var payload: Decoder = .{ .bytes = invalid_region[header_len..] };
++    _ = try payload.slice();
++    payload.offset += 4 * @sizeOf(u32) + @sizeOf(u8);
++    std.mem.writeInt(u32, invalid_region[header_len + payload.offset ..][0..4], std.math.maxInt(u32), .little);
++    testRewriteChecksum(invalid_region);
++    try std.testing.expectError(error.StateInvariant, decode(alloc, invalid_region, 80, 24, null));
++
++    var invalid_explicit_max = try alloc.dupe(u8, original);
++    defer alloc.free(invalid_explicit_max);
++    const explicit_max_offset = try testPrimaryExplicitMaxOffset(invalid_explicit_max);
++    std.mem.writeInt(u64, invalid_explicit_max[explicit_max_offset..][0..8], std.math.maxInt(u64), .little);
++    testRewriteChecksum(invalid_explicit_max);
++    try std.testing.expectError(error.ResourceLimit, decode(alloc, invalid_explicit_max, 80, 24, null));
++}
++
++test "checkpoint rejects invalid enums and saved cursor coordinates" {
++    const alloc = std.testing.allocator;
++    var terminal = try Terminal.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 1024 * 1024 });
++    defer terminal.deinit(alloc);
++    var stream = terminal.vtStream();
++    defer stream.deinit();
++    try stream.nextSlice("\x1b[4;8H\x1b7");
++    const original = try capture(alloc, &terminal, &.{}, .{});
++    defer alloc.free(original);
++
++    const terminal_offsets = try testTerminalOffsets(original);
++    var invalid_mouse_shape = try alloc.dupe(u8, original);
++    defer alloc.free(invalid_mouse_shape);
++    std.mem.writeInt(u32, invalid_mouse_shape[terminal_offsets.mouse_shape..][0..4], std.math.maxInt(u32), .little);
++    testRewriteChecksum(invalid_mouse_shape);
++    try std.testing.expectError(error.StateInvariant, decode(alloc, invalid_mouse_shape, 80, 24, null));
++
++    var invalid_mouse_shift = try alloc.dupe(u8, original);
++    defer alloc.free(invalid_mouse_shift);
++    invalid_mouse_shift[terminal_offsets.mouse_shift_capture] = 0xff;
++    testRewriteChecksum(invalid_mouse_shift);
++    try std.testing.expectError(error.StateInvariant, decode(alloc, invalid_mouse_shift, 80, 24, null));
++
++    const screen_offsets = try testScreenOffsets(alloc, original);
++    var invalid_saved_x = try alloc.dupe(u8, original);
++    defer alloc.free(invalid_saved_x);
++    std.mem.writeInt(u32, invalid_saved_x[screen_offsets.saved_cursor_x..][0..4], std.math.maxInt(u32), .little);
++    testRewriteChecksum(invalid_saved_x);
++    try std.testing.expectError(error.StateInvariant, decode(alloc, invalid_saved_x, 80, 24, null));
++
++    var invalid_kitty_flags = try alloc.dupe(u8, original);
++    defer alloc.free(invalid_kitty_flags);
++    invalid_kitty_flags[screen_offsets.kitty_flags] = 0xff;
++    testRewriteChecksum(invalid_kitty_flags);
++    try std.testing.expectError(error.StateInvariant, decode(alloc, invalid_kitty_flags, 80, 24, null));
++}
 diff --git a/src/terminal/render.zig b/src/terminal/render.zig
 index b6430ea34..10e0ef79d 100644
 --- a/src/terminal/render.zig
@@ -1618,3 +2787,46 @@ index b6430ea34..10e0ef79d 100644
              if (t.modes.get(.reverse_colors)) {
                  self.colors.background = fg;
                  self.colors.foreground = bg;
+diff --git a/src/terminal/stream.zig b/src/terminal/stream.zig
+index ba6b57d5c..4e4444664 100644
+--- a/src/terminal/stream.zig
++++ b/src/terminal/stream.zig
+@@ -514,6 +514,13 @@ pub fn Stream(comptime Handler: type) type {
+             self.handler.deinit();
+         }
+
++        /// Logical checkpoints are only valid between complete VT and UTF-8
++        /// sequences. Callers can retain raw delta bytes and retry after the
++        /// parser reaches this boundary.
++        pub fn checkpointReady(self: *const Self) bool {
++            return self.parser.state == .ground and self.utf8decoder.state == 0;
++        }
++
+         /// Process a string of characters.
+         pub inline fn nextSlice(self: *Self, input: []const u8) !void {
+             // Disable SIMD optimizations if build requests it or if our
+@@ -3447,3 +3454,24 @@ test "stream: SGR with 17+ parameters for underline color" {
+     try s.nextSlice("\x1b[4:3;38;2;51;51;51;48;2;170;170;170;58;2;255;97;136;0m");
+     try testing.expect(s.handler.called);
+ }
++
++test "stream checkpoint boundary tracks incomplete VT and UTF-8 sequences" {
++    const H = struct {
++        pub fn vt(
++            _: *@This(),
++            comptime _: anytype,
++            _: anytype,
++        ) !void {}
++    };
++
++    var s: Stream(H) = .init(.{});
++    try testing.expect(s.checkpointReady());
++    try s.nextSlice("\x1b[38;2;12;");
++    try testing.expect(!s.checkpointReady());
++    try s.nextSlice("34;56m");
++    try testing.expect(s.checkpointReady());
++    try s.nextSlice(&.{ 0xf0, 0x9f });
++    try testing.expect(!s.checkpointReady());
++    try s.nextSlice(&.{ 0x91, 0xa9 });
++    try testing.expect(s.checkpointReady());
++}

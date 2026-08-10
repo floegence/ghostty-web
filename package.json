@@ -1,5 +1,5 @@
 {
-  "name": "ghostty-web",
+  "name": "@floegence/ghostty-web",
   "version": "0.4.0",
   "description": "Web-based terminal emulator using Ghostty's VT100 parser via WebAssembly",
   "type": "module",
@@ -17,7 +17,9 @@
   "files": [
     "dist",
     "ghostty-vt.wasm",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "keywords": [
     "terminal",
@@ -33,10 +35,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/coder/ghostty-web.git"
+    "url": "https://github.com/floegence/ghostty-web.git"
   },
-  "bugs": "https://github.com/coder/ghostty-web/issues",
-  "homepage": "https://github.com/coder/ghostty-web#readme",
+  "bugs": "https://github.com/floegence/ghostty-web/issues",
+  "homepage": "https://github.com/floegence/ghostty-web#readme",
   "license": "MIT",
   "author": "Coder",
   "publishConfig": {
@@ -47,10 +49,12 @@
     "demo": "node demo/bin/demo.js",
     "demo:dev": "node demo/bin/demo.js --dev",
     "prebuild": "bun install",
-    "build": "bun run clean && bun run build:wasm && bun run build:lib && bun run build:wasm-copy",
+    "build": "bun run clean && bun run build:wasm && bun run build:lib && bun run build:wasm-copy && bun run build:provenance && bun run build:verify-artifacts",
     "build:wasm": "./scripts/build-wasm.sh",
     "build:lib": "vite build",
     "build:wasm-copy": "cp ghostty-vt.wasm dist/",
+    "build:provenance": "node scripts/generate-provenance.mjs",
+    "build:verify-artifacts": "node scripts/verify-package-artifacts.mjs",
     "clean": "rm -rf dist",
     "preview": "vite preview",
     "test": "bun test",

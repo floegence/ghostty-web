@@ -414,6 +414,33 @@ export interface GhosttyWasmExports extends WebAssembly.Exports {
   ghostty_terminal_resize(terminal: TerminalHandle, cols: number, rows: number): void;
   ghostty_terminal_write(terminal: TerminalHandle, dataPtr: number, dataLen: number): void;
 
+  // Logical checkpoint API
+  ghostty_terminal_checkpoint_format_version(): number;
+  ghostty_terminal_checkpoint_capture(
+    terminal: TerminalHandle,
+    historySequence: bigint,
+    geometryGeneration: bigint,
+    parserEpoch: bigint,
+    bufPtr: number,
+    bufLen: number,
+    writtenPtr: number
+  ): number;
+  ghostty_terminal_checkpoint_validate(
+    terminal: TerminalHandle,
+    checkpointPtr: number,
+    checkpointLen: number
+  ): number;
+  ghostty_terminal_checkpoint_restore(
+    terminal: TerminalHandle,
+    checkpointPtr: number,
+    checkpointLen: number,
+    enforceCoordinates: boolean,
+    historySequence: bigint,
+    geometryGeneration: bigint,
+    parserEpoch: bigint
+  ): number;
+  ghostty_terminal_checkpoint_state_digest(terminal: TerminalHandle, digestPtr: number): number;
+
   // RenderState API - high-performance rendering (ONE call gets ALL data)
   ghostty_render_state_update(terminal: TerminalHandle): number; // 0=none, 1=partial, 2=full
   ghostty_render_state_get_cols(terminal: TerminalHandle): number;
@@ -492,6 +519,42 @@ export enum DirtyState {
   NONE = 0,
   PARTIAL = 1,
   FULL = 2,
+}
+
+/** Stable result codes returned by checkpoint WASM operations. */
+export enum CheckpointResult {
+  OK = 0,
+  INVALID_FORMAT = 1,
+  UNSUPPORTED_VERSION = 2,
+  CHECKSUM_MISMATCH = 3,
+  DIMENSION_MISMATCH = 4,
+  RESOURCE_LIMIT = 5,
+  STATE_INVARIANT = 6,
+  OUT_OF_MEMORY = 7,
+  BUFFER_TOO_SMALL = 8,
+  INVALID_ARGUMENT = 9,
+}
+
+export interface CheckpointMetadata {
+  formatVersion: number;
+  cols: number;
+  rows: number;
+  uncompressedLength: number;
+  checksum: string;
+  historySequence: bigint;
+  geometryGeneration: bigint;
+  parserEpoch: bigint;
+}
+
+export interface CheckpointCoordinates {
+  historySequence: bigint;
+  geometryGeneration: bigint;
+  parserEpoch: bigint;
+}
+
+export interface CapturedCheckpoint {
+  bytes: Uint8Array;
+  metadata: CheckpointMetadata;
 }
 
 /**
