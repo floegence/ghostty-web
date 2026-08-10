@@ -32,6 +32,10 @@ describe('floegence fork package contract', () => {
 
   test('publishes only the scoped fork package with provenance', async () => {
     const workflow = await readFile('.github/workflows/publish.yml', 'utf8');
+    const nodeVersions = [...workflow.matchAll(/node-version:\s*['"]?(\d+)/g)].map(
+      ([, version]) => version
+    );
+    expect(nodeVersions).toEqual(['24', '24']);
     expect(workflow).toContain('EXPECTED_PACKAGE_NAME="@floegence/ghostty-web"');
     expect(workflow).toContain('npm publish --tag "${NPM_TAG}" --provenance --access public');
     expect(workflow).not.toContain('Publish @ghostty-web/demo');
