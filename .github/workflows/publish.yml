@@ -239,9 +239,10 @@ jobs:
 
           TAGS_JSON=$(npm view "$PACKAGE_NAME" dist-tags --json)
           TAGS_JSON="$TAGS_JSON" EXPECTED_VERSION="$EXPECTED_VERSION" node <<'NODE'
-          const tags = JSON.parse(process.env.TAGS_JSON);
+          const raw = JSON.parse(process.env.TAGS_JSON);
+          const tags = Array.isArray(raw) ? raw[0] : raw;
           const expectedVersion = process.env.EXPECTED_VERSION;
-          if (tags.latest !== expectedVersion || tags.rc !== expectedVersion) {
+          if (!tags || tags.latest !== expectedVersion || tags.rc !== expectedVersion) {
             throw new Error(`Refusing cleanup for unexpected dist-tags: ${JSON.stringify(tags)}`);
           }
           NODE
@@ -250,9 +251,10 @@ jobs:
 
           TAGS_JSON=$(npm view "$PACKAGE_NAME" dist-tags --json)
           TAGS_JSON="$TAGS_JSON" EXPECTED_VERSION="$EXPECTED_VERSION" node <<'NODE'
-          const tags = JSON.parse(process.env.TAGS_JSON);
+          const raw = JSON.parse(process.env.TAGS_JSON);
+          const tags = Array.isArray(raw) ? raw[0] : raw;
           const expectedVersion = process.env.EXPECTED_VERSION;
-          if (Object.hasOwn(tags, 'latest') || tags.rc !== expectedVersion) {
+          if (!tags || Object.hasOwn(tags, 'latest') || tags.rc !== expectedVersion) {
             throw new Error(`Unexpected dist-tags after cleanup: ${JSON.stringify(tags)}`);
           }
           console.log(`Validated dist-tags after cleanup: ${JSON.stringify(tags)}`);
