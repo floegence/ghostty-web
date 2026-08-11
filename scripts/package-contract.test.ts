@@ -59,6 +59,16 @@ describe('floegence fork package contract', () => {
     ).toEqual(['1.3.11', '1.3.11']);
   });
 
+  test('builds the WASM artifact before running release tests', async () => {
+    const workflow = await readFile('.github/workflows/publish.yml', 'utf8');
+    const stableJob = workflow.slice(0, workflow.indexOf('  publish-next:'));
+    const buildWasm = stableJob.indexOf('- name: Build WASM');
+    const runTests = stableJob.indexOf('- name: Run tests');
+
+    expect(buildWasm).toBeGreaterThan(-1);
+    expect(runTests).toBeGreaterThan(buildWasm);
+  });
+
   test('limits the bootstrap token to the explicit first scoped RC publish', async () => {
     const workflow = await readFile('.github/workflows/publish.yml', 'utf8');
 
