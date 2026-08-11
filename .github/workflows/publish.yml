@@ -7,16 +7,6 @@ on:
         description: Git tag to release, e.g. v0.5.0-rc.0
         required: true
         type: string
-      bootstrap:
-        description: Bootstrap the first scoped RC package with the short-lived npm token
-        required: false
-        default: false
-        type: boolean
-      cleanup_bootstrap_latest:
-        description: Remove the unintended latest tag created during the first scoped RC bootstrap
-        required: false
-        default: false
-        type: boolean
   push:
     tags:
       - 'v*'
@@ -33,14 +23,12 @@ jobs:
   publish-stable:
     name: publish stable packages
     runs-on: ubuntu-latest
-    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && inputs.cleanup_bootstrap_latest != true
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
       - name: Resolve tag
         id: tag
         env:
           INPUT_TAG: ${{ inputs.tag }}
-          BOOTSTRAP_REQUESTED: ${{ inputs.bootstrap }}
-          EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
@@ -49,25 +37,7 @@ jobs:
             echo "Expected a vX.Y.Z or vX.Y.Z-prerelease tag, got '$TAG'" >&2
             exit 1
           fi
-          BOOTSTRAP="${BOOTSTRAP_REQUESTED:-false}"
-          if [[ "$BOOTSTRAP" != "true" && "$BOOTSTRAP" != "false" ]]; then
-            echo "Bootstrap must be a boolean input" >&2
-            exit 1
-          fi
-          if [[ "$BOOTSTRAP" == "true" ]]; then
-            if [[ "$EVENT_NAME" != "workflow_dispatch" ]]; then
-              echo "Bootstrap is only permitted for an explicit workflow_dispatch" >&2
-              exit 1
-            fi
-            if [[ "$TAG" == "v0.5.0-rc.0" ]]; then
-              :
-            else
-              echo "Bootstrap is limited to v0.5.0-rc.0" >&2
-              exit 1
-            fi
-          fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "bootstrap=$BOOTSTRAP" >> "$GITHUB_OUTPUT"
           VERSION="${TAG#v}"
           if [[ "$VERSION" == *-* ]]; then
             NPM_TAG="${VERSION#*-}"
@@ -156,30 +126,7 @@ jobs:
       - name: Ensure current npm for trusted publishing
         run: npm install -g npm@latest
 
-      - name: Validate bootstrap registry precondition
-        if: steps.tag.outputs.bootstrap == 'true'
-        run: |
-          set -euo pipefail
-          PACKAGE_NAME=$(node -p "require('./package.json').name")
-          EXPECTED_PACKAGE_NAME="@floegence/ghostty-web"
-          test "$PACKAGE_NAME" = "$EXPECTED_PACKAGE_NAME"
-          set +e
-          LOOKUP_OUTPUT=$(npm view "$PACKAGE_NAME" name 2>&1)
-          LOOKUP_STATUS=$?
-          set -e
-          if [[ "$LOOKUP_STATUS" -eq 0 ]]; then
-            echo "Bootstrap requires the scoped package to be absent" >&2
-            exit 1
-          fi
-          if ! grep -q 'E404' <<<"$LOOKUP_OUTPUT"; then
-            echo "Registry lookup must fail with E404 before bootstrap" >&2
-            printf '%s\n' "$LOOKUP_OUTPUT" >&2
-            exit 1
-          fi
-          echo "Registry lookup returned E404; bootstrap package creation is permitted"
-
       - name: Publish @floegence/ghostty-web
-        if: steps.tag.outputs.bootstrap != 'true'
         env:
           VERSION: ${{ steps.tag.outputs.version }}
           NPM_TAG: ${{ steps.tag.outputs.npm_tag }}
@@ -194,71 +141,6 @@ jobs:
           else
             npm publish --tag "${NPM_TAG}" --provenance --access public
           fi
-
-      - name: Bootstrap publish @floegence/ghostty-web
-        if: steps.tag.outputs.bootstrap == 'true'
-        env:
-          VERSION: ${{ steps.tag.outputs.version }}
-          NPM_TAG: ${{ steps.tag.outputs.npm_tag }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
-        run: |
-          set -euo pipefail
-          PACKAGE_NAME=$(node -p "require('./package.json').name")
-          EXPECTED_PACKAGE_NAME="@floegence/ghostty-web"
-          test "$PACKAGE_NAME" = "$EXPECTED_PACKAGE_NAME"
-          test "$VERSION" = "0.5.0-rc.0"
-          npm publish --tag "${NPM_TAG}" --provenance --access public
-
-  cleanup-bootstrap-latest:
-    name: remove bootstrap latest tag
-    runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && inputs.cleanup_bootstrap_latest == true
-    steps:
-      - name: Setup Node.js for npm
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Ensure current npm
-        run: npm install -g npm@latest
-
-      - name: Remove unintended bootstrap latest tag
-        env:
-          INPUT_TAG: ${{ inputs.tag }}
-          BOOTSTRAP_REQUESTED: ${{ inputs.bootstrap }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
-        run: |
-          set -euo pipefail
-          PACKAGE_NAME="@floegence/ghostty-web"
-          EXPECTED_PACKAGE_NAME="@floegence/ghostty-web"
-          EXPECTED_VERSION="0.5.0-rc.0"
-          test "$PACKAGE_NAME" = "$EXPECTED_PACKAGE_NAME"
-          test "$INPUT_TAG" = "v0.5.0-rc.0"
-          test "$BOOTSTRAP_REQUESTED" = "false"
-
-          TAGS_JSON=$(npm view "$PACKAGE_NAME" dist-tags --json)
-          TAGS_JSON="$TAGS_JSON" EXPECTED_VERSION="$EXPECTED_VERSION" node <<'NODE'
-          const raw = JSON.parse(process.env.TAGS_JSON);
-          const tags = Array.isArray(raw) ? raw[0] : raw;
-          const expectedVersion = process.env.EXPECTED_VERSION;
-          if (!tags || tags.latest !== expectedVersion || tags.rc !== expectedVersion) {
-            throw new Error(`Refusing cleanup for unexpected dist-tags: ${JSON.stringify(tags)}`);
-          }
-          NODE
-
-          npm dist-tag rm "$PACKAGE_NAME" latest
-
-          TAGS_JSON=$(npm view "$PACKAGE_NAME" dist-tags --json)
-          TAGS_JSON="$TAGS_JSON" EXPECTED_VERSION="$EXPECTED_VERSION" node <<'NODE'
-          const raw = JSON.parse(process.env.TAGS_JSON);
-          const tags = Array.isArray(raw) ? raw[0] : raw;
-          const expectedVersion = process.env.EXPECTED_VERSION;
-          if (!tags || Object.hasOwn(tags, 'latest') || tags.rc !== expectedVersion) {
-            throw new Error(`Unexpected dist-tags after cleanup: ${JSON.stringify(tags)}`);
-          }
-          console.log(`Validated dist-tags after cleanup: ${JSON.stringify(tags)}`);
-          NODE
 
   publish-next:
     name: publish next packages
