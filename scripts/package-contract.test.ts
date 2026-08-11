@@ -35,7 +35,7 @@ describe('floegence fork package contract', () => {
     const nodeVersions = [...workflow.matchAll(/node-version:\s*['"]?(\d+)/g)].map(
       ([, version]) => version
     );
-    expect(nodeVersions).toEqual(['24', '24']);
+    expect(nodeVersions).toEqual(['24', '24', '24']);
     expect(workflow).toContain('EXPECTED_PACKAGE_NAME="@floegence/ghostty-web"');
     expect(workflow).toContain('npm publish --tag "${NPM_TAG}" --provenance --access public');
     expect(workflow).not.toContain('Publish @ghostty-web/demo');
@@ -78,12 +78,28 @@ describe('floegence fork package contract', () => {
     expect(workflow).toContain('[[ "$TAG" == "v0.5.0-rc.0" ]]');
     expect(workflow).toContain('npm view "$PACKAGE_NAME" name');
     expect(workflow).toContain('Registry lookup must fail with E404 before bootstrap');
-    expect(workflow.match(/NPM_BOOTSTRAP_TOKEN/g)).toHaveLength(1);
-    expect(workflow.match(/NODE_AUTH_TOKEN/g)).toHaveLength(1);
+    expect(workflow.match(/NPM_BOOTSTRAP_TOKEN/g)).toHaveLength(2);
+    expect(workflow.match(/NODE_AUTH_TOKEN/g)).toHaveLength(2);
     expect(workflow).toContain("if: steps.tag.outputs.bootstrap != 'true'");
     expect(workflow).toContain("if: steps.tag.outputs.bootstrap == 'true'");
     expect(workflow).toContain('npm publish --tag "${NPM_TAG}" --provenance --access public');
     expect(workflow).toContain('npm publish --tag next --provenance --access public');
+  });
+
+  test('guards the one-time bootstrap latest-tag cleanup', async () => {
+    const workflow = await readFile('.github/workflows/publish.yml', 'utf8');
+
+    expect(workflow).toContain('cleanup_bootstrap_latest:');
+    expect(workflow).toContain(
+      "github.event_name == 'workflow_dispatch' && inputs.cleanup_bootstrap_latest == true"
+    );
+    expect(workflow).toContain('EXPECTED_PACKAGE_NAME="@floegence/ghostty-web"');
+    expect(workflow).toContain('EXPECTED_VERSION="0.5.0-rc.0"');
+    expect(workflow).toContain('test "$INPUT_TAG" = "v0.5.0-rc.0"');
+    expect(workflow).toContain('test "$BOOTSTRAP_REQUESTED" = "false"');
+    expect(workflow).toContain('tags.latest !== expectedVersion || tags.rc !== expectedVersion');
+    expect(workflow).toContain('npm dist-tag rm "$PACKAGE_NAME" latest');
+    expect(workflow).toContain("Object.hasOwn(tags, 'latest') || tags.rc !== expectedVersion");
   });
 
   test('documents fork ownership and the pinned Ghostty patch boundary', async () => {

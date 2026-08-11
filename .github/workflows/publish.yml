@@ -12,6 +12,11 @@ on:
         required: false
         default: false
         type: boolean
+      cleanup_bootstrap_latest:
+        description: Remove the unintended latest tag created during the first scoped RC bootstrap
+        required: false
+        default: false
+        type: boolean
   push:
     tags:
       - 'v*'
@@ -28,7 +33,7 @@ jobs:
   publish-stable:
     name: publish stable packages
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && inputs.cleanup_bootstrap_latest != true
     steps:
       - name: Resolve tag
         id: tag
@@ -203,6 +208,55 @@ jobs:
           test "$PACKAGE_NAME" = "$EXPECTED_PACKAGE_NAME"
           test "$VERSION" = "0.5.0-rc.0"
           npm publish --tag "${NPM_TAG}" --provenance --access public
+
+  cleanup-bootstrap-latest:
+    name: remove bootstrap latest tag
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.cleanup_bootstrap_latest == true
+    steps:
+      - name: Setup Node.js for npm
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Ensure current npm
+        run: npm install -g npm@latest
+
+      - name: Remove unintended bootstrap latest tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          BOOTSTRAP_REQUESTED: ${{ inputs.bootstrap }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          PACKAGE_NAME="@floegence/ghostty-web"
+          EXPECTED_PACKAGE_NAME="@floegence/ghostty-web"
+          EXPECTED_VERSION="0.5.0-rc.0"
+          test "$PACKAGE_NAME" = "$EXPECTED_PACKAGE_NAME"
+          test "$INPUT_TAG" = "v0.5.0-rc.0"
+          test "$BOOTSTRAP_REQUESTED" = "false"
+
+          TAGS_JSON=$(npm view "$PACKAGE_NAME" dist-tags --json)
+          TAGS_JSON="$TAGS_JSON" EXPECTED_VERSION="$EXPECTED_VERSION" node <<'NODE'
+          const tags = JSON.parse(process.env.TAGS_JSON);
+          const expectedVersion = process.env.EXPECTED_VERSION;
+          if (tags.latest !== expectedVersion || tags.rc !== expectedVersion) {
+            throw new Error(`Refusing cleanup for unexpected dist-tags: ${JSON.stringify(tags)}`);
+          }
+          NODE
+
+          npm dist-tag rm "$PACKAGE_NAME" latest
+
+          TAGS_JSON=$(npm view "$PACKAGE_NAME" dist-tags --json)
+          TAGS_JSON="$TAGS_JSON" EXPECTED_VERSION="$EXPECTED_VERSION" node <<'NODE'
+          const tags = JSON.parse(process.env.TAGS_JSON);
+          const expectedVersion = process.env.EXPECTED_VERSION;
+          if (Object.hasOwn(tags, 'latest') || tags.rc !== expectedVersion) {
+            throw new Error(`Unexpected dist-tags after cleanup: ${JSON.stringify(tags)}`);
+          }
+          console.log(`Validated dist-tags after cleanup: ${JSON.stringify(tags)}`);
+          NODE
 
   publish-next:
     name: publish next packages
