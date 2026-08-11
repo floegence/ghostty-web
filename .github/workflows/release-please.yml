@@ -9,7 +9,7 @@ permissions:
   actions: write
   contents: write
   issues: write
-  pull-requests: write
+  pull-requests: read
 
 concurrency:
   group: release-please-${{ github.ref }}
@@ -44,6 +44,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_PLEASE_MODE: manual-pr
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           RELEASE_NOTES_MODEL: ${{ vars.RELEASE_NOTES_MODEL || secrets.RELEASE_NOTES_MODEL }}
         run: bun run release-please
