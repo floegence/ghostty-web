@@ -97,6 +97,7 @@ describe('floegence fork package contract', () => {
     expect(workflow).toContain('EXPECTED_VERSION="0.5.0-rc.0"');
     expect(workflow).toContain('test "$INPUT_TAG" = "v0.5.0-rc.0"');
     expect(workflow).toContain('test "$BOOTSTRAP_REQUESTED" = "false"');
+    expect(workflow).toContain('const tags = Array.isArray(raw) ? raw[0] : raw;');
     expect(workflow).toContain('tags.latest !== expectedVersion || tags.rc !== expectedVersion');
     expect(workflow).toContain('npm dist-tag rm "$PACKAGE_NAME" latest');
     expect(workflow).toContain("Object.hasOwn(tags, 'latest') || tags.rc !== expectedVersion");
