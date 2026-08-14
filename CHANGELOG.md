@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0-rc.1](https://github.com/floegence/ghostty-web/compare/v0.5.0-rc.0...v0.5.0-rc.1) (2026-08-14)
+
+
+### Bug Fixes
+
+* **release:** clean bootstrap latest dist-tag ([3a4f719](https://github.com/floegence/ghostty-web/commit/3a4f7193be8fe0fc40a221db421172180d7bc744))
+* **release:** normalize npm dist-tag readback ([e1b46cf](https://github.com/floegence/ghostty-web/commit/e1b46cf9c3181e59f087e277ea17abd532adab58))
+* **release:** support manual release pull requests ([bd40960](https://github.com/floegence/ghostty-web/commit/bd40960ba3f159f6855a65ca41e2432f88b98d3d))
+
+
+### Documentation
+
+* **repo:** mark fork as superseded ([#10](https://github.com/floegence/ghostty-web/issues/10)) ([b921e94](https://github.com/floegence/ghostty-web/commit/b921e9445b3d1e172e52bcfda01335e4e40172f0))
+
 ## [0.5.0-rc.0](https://github.com/floegence/ghostty-web/compare/v0.4.0...v0.5.0-rc.0) (2026-08-10)
 
 
