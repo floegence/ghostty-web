@@ -1,5 +1,15 @@
 # @floegence/ghostty-web
 
+> [!IMPORTANT]
+> This fork is no longer maintained. It has been superseded by
+> [FloeTerm 0.15.4](https://github.com/floegence/floeterm/tree/v0.15.4), which
+> uses a server-side native Ghostty engine and sends semantic presentations to
+> browser views. New integrations should use
+> [`@floegence/floeterm-terminal-web@0.15.4`](https://www.npmjs.com/package/@floegence/floeterm-terminal-web/v/0.15.4)
+> with
+> [`terminal-go@v0.10.3`](https://github.com/floegence/floeterm/tree/terminal-go/v0.10.3/terminal-go).
+> Existing tags and releases remain available only for historical reproduction.
+
 [![license](https://img.shields.io/github/license/floegence/ghostty-web)](./LICENSE)
 
 This is the FloeTerm-maintained fork of Coder's ghostty-web. It publishes only
